@@ -49,7 +49,12 @@ function notify(title: string, body: string): void {
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.on("agent_end", async () => {
+	// Use `agent_settled` rather than `agent_end`: `agent_end` fires after each
+	// low-level run, but Pi may still auto-retry, auto-compact and retry, or
+	// continue with queued follow-up messages. `agent_settled` fires only when
+	// Pi will not continue running automatically, so the notification does not
+	// fire prematurely.
+	pi.on("agent_settled", async () => {
 		notify("Pi", "Ready for input");
 	});
 }
