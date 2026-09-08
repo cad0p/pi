@@ -130,3 +130,28 @@ export function serializeConversation(messages: Message[]): string {
 
 	return parts.join("\n\n");
 }
+
+// ============================================================================
+// Boundary Orphan Tool Results
+// ============================================================================
+
+/**
+ * Drop toolResult messages whose toolCall has no matching assistant toolCall
+ * in the payload (e.g. a branch cut between a tool call and its result).
+ * Providers reject result blocks that reference calls outside the request,
+ * so the structured (cache-preserving) summary request must strip them.
+ * Operates on convertToLlm() output; preserves order and never mutates.
+ */
+export function stripBoundaryOrphanToolResults(messages: Message[]): Message[] {
+	const callIds = new Set<string>();
+	for (const message of messages) {
+		if (message.role !== "assistant") continue;
+		for (const block of message.content) {
+			if (block.type === "toolCall") callIds.add(block.id);
+		}
+	}
+	return messages.filter((message) => {
+		if (message.role !== "toolResult") return true;
+		return callIds.has(message.toolCallId);
+	});
+}

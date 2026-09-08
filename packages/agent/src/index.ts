@@ -44,12 +44,15 @@ export * from "./harness/agent-harness.ts";
 export {
 	type BranchPreparation,
 	type BranchSummaryDetails,
+	type BranchSummaryRequestContext,
 	type BranchSummaryResult,
+	buildStructuredSummaryMessages,
 	type CollectEntriesResult,
 	collectEntriesForBranchSummary,
 	type FileOperations,
 	type GenerateBranchSummaryOptions,
 	generateBranchSummary,
+	type PrepareBranchEntriesOptions,
 	prepareBranchEntries,
 } from "./harness/compaction/branch-summarization.ts";
 export {
@@ -70,6 +73,7 @@ export {
 	serializeConversation,
 	shouldCompact,
 } from "./harness/compaction/compaction.ts";
+export { stripBoundaryOrphanToolResults } from "./harness/compaction/utils.ts";
 export * from "./harness/context.ts";
 export * from "./harness/messages.ts";
 export * from "./harness/prompt-templates.ts";

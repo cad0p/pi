@@ -156,3 +156,28 @@ export function serializeConversation(messages: Message[]): string {
 export const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.
 
 Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.`;
+
+// ============================================================================
+// Boundary Orphan Tool Results
+// ============================================================================
+
+/**
+ * Drop toolResult messages whose toolCall has no matching assistant toolCall
+ * in the payload (e.g. a branch cut between a tool call and its result).
+ * Providers reject result blocks that reference calls outside the request,
+ * so the structured (cache-preserving) summary request must strip them.
+ * Operates on convertToLlm() output; preserves order and never mutates.
+ */
+export function stripBoundaryOrphanToolResults(messages: Message[]): Message[] {
+	const callIds = new Set<string>();
+	for (const message of messages) {
+		if (message.role !== "assistant") continue;
+		for (const block of message.content) {
+			if (block.type === "toolCall") callIds.add(block.id);
+		}
+	}
+	return messages.filter((message) => {
+		if (message.role !== "toolResult") return true;
+		return callIds.has(message.toolCallId);
+	});
+}

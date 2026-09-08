@@ -5,9 +5,9 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { RetryCallbacks, RetryPolicy } from "@earendil-works/pi-ai";
-import { contentText } from "@earendil-works/pi-ai";
+import { contentText, type Message } from "@earendil-works/pi-ai";
 import type { Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai/compat";
 import {
 	convertToLlm,
@@ -15,7 +15,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
-import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
+import { type ReadonlySessionManager, type SessionEntry, sessionEntryToContextMessages } from "../session-manager.ts";
 import { completeSummarization, estimateTokens, getSummarizationFailure } from "./compaction.ts";
 import {
 	computeFileLists,
@@ -25,6 +25,7 @@ import {
 	formatFileOperations,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
+	stripBoundaryOrphanToolResults,
 } from "./utils.ts";
 
 // ============================================================================
@@ -87,6 +88,36 @@ export interface GenerateBranchSummaryOptions {
 	retry?: RetryPolicy;
 	/** Optional callbacks for retry reporting (e.g. TUI retry indicators). */
 	callbacks?: RetryCallbacks;
+	/**
+	 * Live thinking level, forwarded as the request reasoning effort on the
+	 * cache-preserving path only. Live turns send their thinking level
+	 * explicitly and the provider keys cache on it — a summary that omits
+	 * it runs at a different effort and can never hit the live prefix.
+	 * The legacy path never sent reasoning and is unchanged.
+	 */
+	thinkingLevel?: ThinkingLevel;
+	/**
+	 * Live request context for the cache-preserving summary path.
+	 * When provided, the summary request reuses the live session's system
+	 * prompt, tool array, and session id, and sends the branch history as
+	 * structured messages (plus the trailing instruction) instead of a
+	 * serialized text blob — preserving the prompt-cache prefix shared
+	 * with live turns. When omitted, the legacy standalone request is used.
+	 */
+	requestContext?: BranchSummaryRequestContext;
+}
+
+/**
+ * Live session request context reused by the cache-preserving summary path.
+ * Must be the exact values live turns send, or the cache prefix diverges.
+ */
+export interface BranchSummaryRequestContext {
+	/** Live system prompt (e.g. the session's base system prompt). */
+	systemPrompt: string;
+	/** Live tool array (the same instances live turns send). */
+	tools: AgentTool<any>[];
+	/** Live session id, so the summary joins the session's cache namespace. */
+	sessionId?: string;
 }
 
 // ============================================================================
@@ -192,7 +223,21 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
  * @param entries - Entries in chronological order
  * @param tokenBudget - Maximum tokens to include (0 = no limit)
  */
-export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: number = 0): BranchPreparation {
+export interface PrepareBranchEntriesOptions {
+	/**
+	 * Include toolResult messages (via sessionEntryToContextMessages, the
+	 * same projection live turns use) instead of skipping them. Required
+	 * for the cache-preserving path so the request prefix matches live
+	 * turns byte-for-byte; the legacy serialized path keeps skipping them.
+	 */
+	includeToolResults?: boolean;
+}
+
+export function prepareBranchEntries(
+	entries: SessionEntry[],
+	tokenBudget: number = 0,
+	options: PrepareBranchEntriesOptions = {},
+): BranchPreparation {
 	const messages: AgentMessage[] = [];
 	const fileOps = createFileOps();
 	let totalTokens = 0;
@@ -216,34 +261,63 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 	}
 
 	// Second pass: walk from newest to oldest, adding messages until token budget
+	let overBudget = false;
 	for (let i = entries.length - 1; i >= 0; i--) {
+		if (overBudget) break;
 		const entry = entries[i];
-		const message = getMessageFromEntry(entry);
-		if (!message) continue;
+		const entryMessages = options.includeToolResults
+			? sessionEntryToContextMessages(entry)
+			: (() => {
+					const message = getMessageFromEntry(entry);
+					return message ? [message] : [];
+				})();
+		// Unshift in reverse so intra-entry order is preserved chronologically
+		for (let j = entryMessages.length - 1; j >= 0; j--) {
+			const message = entryMessages[j];
 
-		// Extract file ops from assistant messages (tool calls)
-		extractFileOpsFromMessage(message, fileOps);
+			// Extract file ops from assistant messages (tool calls)
+			extractFileOpsFromMessage(message, fileOps);
 
-		const tokens = estimateTokens(message);
+			const tokens = estimateTokens(message);
 
-		// Check budget before adding
-		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
-			// If this is a summary entry, try to fit it anyway as it's important context
-			if (entry.type === "compaction" || entry.type === "branch_summary") {
-				if (totalTokens < tokenBudget * 0.9) {
-					messages.unshift(message);
-					totalTokens += tokens;
+			// Check budget before adding
+			if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
+				// If this is a summary entry, try to fit it anyway as it's important context
+				if (entry.type === "compaction" || entry.type === "branch_summary") {
+					if (totalTokens < tokenBudget * 0.9) {
+						messages.unshift(message);
+						totalTokens += tokens;
+					}
 				}
+				// Stop - we've hit the budget
+				overBudget = true;
+				break;
 			}
-			// Stop - we've hit the budget
-			break;
-		}
 
-		messages.unshift(message);
-		totalTokens += tokens;
+			messages.unshift(message);
+			totalTokens += tokens;
+		}
 	}
 
 	return { messages, fileOps, totalTokens };
+}
+
+/**
+ * Build the structured summary request messages for the cache-preserving
+ * path: branch evidence (as live turns send it, minus boundary-orphan tool
+ * results) plus the trailing summarization instruction. The evidence prefix
+ * is byte-identical to what a live turn would send for the same history,
+ * which is what preserves the prompt-cache prefix.
+ */
+export function buildStructuredSummaryMessages(evidence: Message[], instructions: string): Message[] {
+	return [
+		...stripBoundaryOrphanToolResults(evidence),
+		{
+			role: "user",
+			content: [{ type: "text", text: instructions }],
+			timestamp: Date.now(),
+		},
+	];
 }
 
 // ============================================================================
@@ -306,22 +380,24 @@ export async function generateBranchSummary(
 		streamFn,
 		retry,
 		callbacks,
+		requestContext,
+		thinkingLevel,
 	} = options;
 
 	// Token budget = context window minus reserved space for prompt + response
 	const contextWindow = model.contextWindow || 128000;
 	const tokenBudget = contextWindow - reserveTokens;
 
-	const { messages, fileOps } = prepareBranchEntries(entries, tokenBudget);
+	const { messages, fileOps } = prepareBranchEntries(entries, tokenBudget, {
+		includeToolResults: requestContext !== undefined,
+	});
 
 	if (messages.length === 0) {
 		return { summary: "No content to summarize" };
 	}
 
-	// Transform to LLM-compatible messages, then serialize to text
-	// Serialization prevents the model from treating it as a conversation to continue
+	// Transform to LLM-compatible messages
 	const llmMessages = convertToLlm(messages);
-	const conversationText = serializeConversation(llmMessages);
 
 	// Build prompt
 	let instructions: string;
@@ -332,15 +408,6 @@ export async function generateBranchSummary(
 	} else {
 		instructions = BRANCH_SUMMARY_PROMPT;
 	}
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${instructions}`;
-
-	const summarizationMessages = [
-		{
-			role: "user" as const,
-			content: [{ type: "text" as const, text: promptText }],
-			timestamp: Date.now(),
-		},
-	];
 
 	const maxTokens = Math.min(4096, model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY);
 
@@ -348,8 +415,50 @@ export async function generateBranchSummary(
 	// request behavior (timeouts, retries, attribution headers) stays consistent
 	// without running through agent state/events. Retried via completeSummarization
 	// so transient stream drops reuse the configured retry policy.
-	const context = { systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages };
-	const requestOptions: SimpleStreamOptions = { apiKey, headers, env, signal, maxTokens };
+	let context: { systemPrompt: string; messages: Message[]; tools?: AgentTool<any>[] };
+	let requestOptions: SimpleStreamOptions;
+	if (requestContext) {
+		// Cache-preserving path: structured history under the live system
+		// prompt and tool array, so the request shares the live turns'
+		// prompt-cache prefix. The live session id joins the session's
+		// cache namespace.
+		const summarizationMessages = buildStructuredSummaryMessages(llmMessages, instructions);
+		context = {
+			systemPrompt: requestContext.systemPrompt,
+			messages: summarizationMessages,
+			tools: requestContext.tools,
+		};
+		// Explicit "short" retention: reads key on sessionId + prefix bytes
+		// (a "none" request sends no session id and can never hit), while the
+		// value only governs this request's own single-use trailer
+		// breakpoints — "short" matches the provider default live turns get.
+		requestOptions = {
+			apiKey,
+			headers,
+			env,
+			signal,
+			maxTokens,
+			cacheRetention: "short",
+			...(thinkingLevel === undefined || thinkingLevel === "off" ? {} : { reasoning: thinkingLevel }),
+			...(requestContext.sessionId ? { sessionId: requestContext.sessionId } : {}),
+		};
+	} else {
+		// Legacy standalone path: serialize to text so the model does not
+		// treat the evidence as a conversation to continue. Cache is
+		// explicitly disabled: this shape shares no prefix with live turns.
+		const conversationText = serializeConversation(llmMessages);
+		const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${instructions}`;
+
+		const summarizationMessages: Message[] = [
+			{
+				role: "user",
+				content: [{ type: "text", text: promptText }],
+				timestamp: Date.now(),
+			},
+		];
+		context = { systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages };
+		requestOptions = { apiKey, headers, env, signal, maxTokens, cacheRetention: "none" };
+	}
 	const response = await completeSummarization(model, context, requestOptions, streamFn, retry, callbacks);
 
 	// Check if aborted or errored

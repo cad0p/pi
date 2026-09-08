@@ -3219,6 +3219,16 @@ export class AgentSession {
 					streamFn: this.agent.streamFunction,
 					retry: this.settingsManager.getRetrySettings(),
 					callbacks: this._summarizationRetryCallbacks({ source: "branchSummary" }),
+					// Reuse the live request prefix (system prompt, tools,
+					// session id) so the summary shares the prompt-cache
+					// prefix with live turns instead of a cold standalone
+					// request.
+					requestContext: {
+						systemPrompt: this._systemPromptOverride ?? this._baseSystemPrompt,
+						tools: this.agent.state.tools.slice(),
+						sessionId: this.sessionId,
+					},
+					thinkingLevel: this.thinkingLevel,
 				});
 				if (result.aborted) {
 					return { cancelled: true, aborted: true };

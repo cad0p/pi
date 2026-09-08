@@ -119,7 +119,11 @@ export function createSummaryRequestOptions(options: SimpleStreamOptions, contex
 		...options,
 		signal: context.abortSignal,
 		telemetryContext: getTelemetryContext(context),
-		cacheRetention: "none",
+		// One-off summaries default to no cache retention. Callers that
+		// explicitly preserve the live request prefix (branch summaries
+		// reusing the live system/tools/session) pass their own
+		// cacheRetention through untouched.
+		cacheRetention: options.cacheRetention ?? "none",
 		sessionId: options.sessionId ?? uuidv7(),
 	};
 }

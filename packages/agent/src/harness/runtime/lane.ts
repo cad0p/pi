@@ -782,6 +782,10 @@ export class Lane<TContext extends object | undefined> implements AgentLane {
 					]);
 					const oldIds = new Set(oldPath.map((entry) => entry.id));
 					const commonAncestorId = targetPath.find((entry) => oldIds.has(entry.id))?.id ?? null;
+					// Include tool results: the structural consumer sends
+					// the preparation as structured history under the live
+					// request prefix, which must match live turns
+					// byte-for-byte for prompt-cache hits.
 					preparation = prepareBranchEntries(
 						oldPath
 							.slice(
@@ -791,6 +795,8 @@ export class Lane<TContext extends object | undefined> implements AgentLane {
 									: oldPath.findIndex((entry) => entry.id === commonAncestorId),
 							)
 							.reverse(),
+						0,
+						{ includeToolResults: true },
 					);
 				}
 			}

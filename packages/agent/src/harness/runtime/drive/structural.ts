@@ -53,6 +53,7 @@ import {
 	normalizedRetryPolicy,
 	planBoundaryInbox,
 } from "./boundary.ts";
+import { resolveActiveTools, resolveSystemPrompt } from "./generation.ts";
 import { retryDelay, retryNotBefore, waitUntil } from "./retry.ts";
 import { operationCleanupWrites, operationResultRecord } from "./terminal.ts";
 
@@ -784,7 +785,7 @@ function requestStreamOptions(
 		maxRetryDelayMs: streamOptions.maxRetryDelayMs,
 		headers: streamOptions.headers,
 		metadata: streamOptions.metadata,
-		cacheRetention: "none",
+		cacheRetention: options.cacheRetention ?? "none",
 		deferred: false,
 		signal: context.abortSignal,
 		telemetryContext: getTelemetryContext(context),
@@ -897,9 +898,21 @@ async function performStructuralAttempt<TContext extends object | undefined>(
 		if (!("messages" in preparation)) {
 			throw new SessionInvariantError("Branch summary has invalid durable preparation");
 		}
+		// Reuse the live lane prefix (system prompt, tools, session id) so
+		// the summary shares the prompt-cache prefix with live turns
+		// instead of a cold standalone request.
+		const summaryConfig = lane.readConfig();
 		const result = await generateBranchSummaryWithRequest(
 			preparation,
-			{ customInstructions: effect.task.customInstructions },
+			{
+				customInstructions: effect.task.customInstructions,
+				thinkingLevel: effect.summaryContext.configuration.thinkingLevel,
+				requestContext: {
+					systemPrompt: await resolveSystemPrompt(lane, drive.context),
+					tools: resolveActiveTools(summaryConfig.tools, effect.summaryContext.configuration.activeToolNames),
+					sessionId: `${lane.session.metadata.id}:${lane.name}`,
+				},
+			},
 			request,
 			drive.context,
 		);
