@@ -228,6 +228,8 @@ type CompactionCostNotice = {
 	type: "compaction_cost";
 	kind: "compaction" | "branch_summary";
 	usage: Usage;
+	/** Measured cache miss paid by a branch summary, re-rendered on rebuilds. */
+	cacheMiss?: CacheMiss;
 };
 
 type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" }> | CompactionCostNotice;
@@ -3707,6 +3709,12 @@ export class InteractiveMode {
 			}
 			if (isCompactionCostNotice(item)) {
 				this.addCompactionCostNotice(item);
+				// Re-render a persisted branch-summary miss on rebuilds
+				// (navigate/rewind, resume). Same setting gate and display
+				// thresholds as live misses; off stays today's behavior.
+				if (item.cacheMiss !== undefined && this.settingsManager.getShowCacheMissNotices()) {
+					this.addCacheMissNotice(item.cacheMiss);
+				}
 				continue;
 			}
 
@@ -3789,7 +3797,17 @@ export class InteractiveMode {
 			}
 			const messages = sessionEntryToContextMessages(entry);
 			if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage && messages.length > 0) {
-				return [...messages, { type: "compaction_cost", kind: entry.type, usage: entry.usage }];
+				return [
+					...messages,
+					{
+						type: "compaction_cost",
+						kind: entry.type,
+						usage: entry.usage,
+						...(entry.type === "branch_summary" && entry.cacheMiss !== undefined
+							? { cacheMiss: entry.cacheMiss }
+							: {}),
+					},
+				];
 			}
 			return messages;
 		});

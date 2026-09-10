@@ -16,6 +16,7 @@ import { convertToLlm, createBranchSummaryMessage, createCompactionSummaryMessag
 import { sessionEntryToContextMessages } from "../session/context.ts";
 import type { Branch, Entry, Session } from "../session/index.ts";
 import { BranchSummaryError, err, ok, type Result } from "../types.ts";
+import type { BranchSummaryCacheMiss } from "./cache-miss.ts";
 import {
 	completeSimpleWithRetries,
 	createSummaryRequestOptions,
@@ -39,6 +40,12 @@ export interface BranchSummaryResult {
 	usage?: Usage;
 	readFiles: string[];
 	modifiedFiles: string[];
+	/**
+	 * Measured prompt-cache miss paid by the summary request itself, if any.
+	 * Attached by the structural drive from the measured response usage;
+	 * display metadata only, never billed-token accounting.
+	 */
+	cacheMiss?: BranchSummaryCacheMiss;
 }
 
 /** File-operation details stored on generated branch summary entries. */

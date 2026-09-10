@@ -329,6 +329,19 @@ export type HarnessEventPayload =
 			terminate: boolean;
 	  }
 	| { type: "entry_added"; entry: Entry }
+	| {
+			type: "cache_miss";
+			/** Branch summary entry whose request paid the miss. */
+			entryId: string;
+			/** Prompt tokens that were in the previous turn's prompt but not read from cache. */
+			missedTokens: number;
+			/** Extra dollars paid vs. a full cache hit; 0 when pricing is unknown. */
+			missedCost: number;
+			/** Milliseconds since the previous request (which last refreshed the cache). */
+			idleMs: number;
+			/** True when the model changed relative to the previous request. */
+			modelChanged: boolean;
+	  }
 	| { type: "queue_update"; queues: LaneQueuedItem[] }
 	| ({ type: "value_update" } & (
 			| { value: "session_name"; name: string | undefined }

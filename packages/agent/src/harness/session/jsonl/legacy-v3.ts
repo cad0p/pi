@@ -1,6 +1,7 @@
 import type { ImageContent, TextContent, Usage } from "@earendil-works/pi-ai";
 import { uuidv7 } from "@earendil-works/pi-ai/utils/uuid";
 import type { AgentMessage, ThinkingLevel } from "../../../types.ts";
+import type { BranchSummaryCacheMiss } from "../../compaction/cache-miss.ts";
 import type { Context } from "../../context.ts";
 import { createBranchSummaryMessage, createCompactionSummaryMessage } from "../../messages.ts";
 import type { FileSystem } from "../../types.ts";
@@ -48,6 +49,7 @@ interface LegacyV3BranchSummaryEntry extends LegacyV3EntryBase {
 	summary: string;
 	details?: JsonValue;
 	usage?: Usage;
+	cacheMiss?: BranchSummaryCacheMiss;
 	fromHook?: boolean;
 }
 
@@ -353,6 +355,7 @@ function normalizeRetainedEntry(
 			summary: entry.summary,
 			details: entry.details,
 			usage: entry.usage,
+			...(entry.cacheMiss === undefined ? {} : { cacheMiss: entry.cacheMiss }),
 			fromHook: entry.fromHook ?? false,
 		};
 	}

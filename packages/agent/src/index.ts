@@ -56,6 +56,14 @@ export {
 	prepareBranchEntries,
 } from "./harness/compaction/branch-summarization.ts";
 export {
+	type BranchSummaryCacheMiss,
+	CACHE_MISS_DISPLAY_COST,
+	CACHE_MISS_DISPLAY_TOKENS,
+	detectBranchSummaryCacheMiss,
+	type ModelPriceSource,
+	shouldDisplayBranchSummaryCacheMiss,
+} from "./harness/compaction/cache-miss.ts";
+export {
 	type CompactionPreparation,
 	type CompactionSettings,
 	type CompactResult,

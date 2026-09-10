@@ -8,6 +8,7 @@ import {
 import type { HarnessEvent } from "../../agent-harness.ts";
 import type { BranchPreparation, BranchSummaryResult } from "../../compaction/branch-summarization.ts";
 import { generateBranchSummaryWithRequest } from "../../compaction/branch-summarization.ts";
+import { detectBranchSummaryCacheMiss, shouldDisplayBranchSummaryCacheMiss } from "../../compaction/cache-miss.ts";
 import type { CompactionPreparation, CompactResult, SummaryRequest } from "../../compaction/compaction.ts";
 import { compactWithRequest, prepareCompaction, shouldCompact } from "../../compaction/compaction.ts";
 import { type Context, getTelemetryContext, withAbortSignal } from "../../context.ts";
@@ -287,6 +288,7 @@ async function publishStructuralOutcome<TContext extends object | undefined>(
 					summary: outcome.result.summary,
 					details: { readFiles: outcome.result.readFiles, modifiedFiles: outcome.result.modifiedFiles },
 					...(outcome.result.usage === undefined ? {} : { usage: outcome.result.usage }),
+					...(outcome.result.cacheMiss === undefined ? {} : { cacheMiss: outcome.result.cacheMiss }),
 					fromHook: outcome.fromHook,
 				};
 				writes.push(setValue(branchTip(lane.name), boundary.targetId));
@@ -297,6 +299,29 @@ async function publishStructuralOutcome<TContext extends object | undefined>(
 				baseEvents.push((commit) =>
 					committedEntryEvents([entry], commit, lane.name, drive.operationId, entryWriteIndex),
 				);
+				// Display projection for the measured miss: entry_added carries
+				// the raw data for transcript consumers; this event is what
+				// renderers consume (gated on their own setting). Below the
+				// display thresholds no event is emitted, mirroring the
+				// classic addCacheMissNotice silence.
+				if (
+					outcome.result.cacheMiss !== undefined &&
+					shouldDisplayBranchSummaryCacheMiss(outcome.result.cacheMiss)
+				) {
+					const cacheMiss = outcome.result.cacheMiss;
+					baseEvents.push(() => [
+						{
+							type: "cache_miss",
+							lane: lane.name,
+							runId: drive.operationId,
+							entryId: outcome.resultEntryId,
+							missedTokens: cacheMiss.missedTokens,
+							missedCost: cacheMiss.missedCost,
+							idleMs: cacheMiss.idleMs,
+							modelChanged: cacheMiss.modelChanged,
+						},
+					]);
+				}
 			}
 
 			const attempt =
@@ -925,9 +950,20 @@ async function performStructuralAttempt<TContext extends object | undefined>(
 				retryable: lastResponse !== undefined && isRetryableAssistantError(lastResponse),
 			};
 		}
+		// Measure whether the summary request itself missed the live
+		// prompt-cache prefix. lastResponse is the measured response;
+		// preparation.messages is the prefix it should have read back.
+		// First summaries, truncated prefixes, and cold requests warn
+		// exactly when the measured usage shows a miss; warm hits stay
+		// silent. Hook summaries skip this: their usage wasn't measured
+		// here.
+		const cacheMiss =
+			lastResponse?.usage === undefined
+				? undefined
+				: detectBranchSummaryCacheMiss(preparation.messages, lastResponse, lane.models);
 		return {
 			kind: "branch_summary",
-			result: result.value,
+			result: cacheMiss === undefined ? result.value : { ...result.value, cacheMiss },
 			retryable: lastResponse !== undefined && isRetryableAssistantError(lastResponse),
 		};
 	} catch (error) {

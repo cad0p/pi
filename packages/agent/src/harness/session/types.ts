@@ -2,6 +2,7 @@ import type { JsonValue } from "@earendil-works/chord";
 import type { AssistantMessage, StopReason, Usage } from "@earendil-works/pi-ai";
 import type { AgentMessage, QueueMode, ThinkingLevel } from "../../types.ts";
 import type { BranchPreparation } from "../compaction/branch-summarization.ts";
+import type { BranchSummaryCacheMiss } from "../compaction/cache-miss.ts";
 import type { CompactionPreparation, CompactionSettings } from "../compaction/compaction.ts";
 import type { Context } from "../context.ts";
 import type { AgentHarnessStreamOptions } from "../types.ts";
@@ -46,6 +47,11 @@ export interface BranchSummaryEntry extends EntryBase {
 	summary: string;
 	details?: JsonValue;
 	usage?: Usage;
+	/**
+	 * Measured prompt-cache miss paid by the summary request itself, if any.
+	 * Display metadata only: never fed back into billed-token accounting.
+	 */
+	cacheMiss?: BranchSummaryCacheMiss;
 	fromHook: boolean;
 }
 

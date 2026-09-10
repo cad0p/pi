@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "./session-manager.ts";
 
 /**
@@ -55,7 +55,7 @@ interface PreviousRequest {
  */
 function detectMiss(
 	prev: PreviousRequest | undefined,
-	message: AssistantMessage,
+	message: Pick<AssistantMessage, "provider" | "model" | "usage" | "timestamp">,
 	models: ModelPriceSource,
 ): CacheMiss | undefined {
 	const usage = message.usage;
@@ -161,4 +161,22 @@ export function detectCacheMiss(
 	models: ModelPriceSource,
 ): CacheMiss | undefined {
 	return detectMiss(scan(entries, models).prev, message, models);
+}
+
+/**
+ * Detect a cache miss on a just-completed branch-summary response from its
+ * measured usage. `entries` is the session before the summary entry is
+ * appended. Production seam for the branch-summary generation sites (classic
+ * AgentSession.navigateTree); the legacy retention-none path flows through
+ * the same measurement with no per-path special-casing.
+ */
+export function detectBranchSummaryCacheMiss(
+	entries: SessionEntry[],
+	responseUsage: Usage,
+	provider: string,
+	model: string,
+	timestamp: number,
+	models: ModelPriceSource,
+): CacheMiss | undefined {
+	return detectMiss(scan(entries, models).prev, { provider, model, usage: responseUsage, timestamp }, models);
 }

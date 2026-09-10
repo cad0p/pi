@@ -1,6 +1,7 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
+import type { CacheMiss } from "../src/core/cache-stats.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -195,6 +196,161 @@ describe("InteractiveMode compaction events", () => {
 			usage,
 		});
 		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
+	});
+
+	test("carries persisted branch-summary misses into rebuild notices", () => {
+		const usage: Usage = {
+			input: 10,
+			output: 20,
+			cacheRead: 30,
+			cacheWrite: 40,
+			totalTokens: 100,
+			cost: { input: 0.01, output: 0.02, cacheRead: 0.03, cacheWrite: 0.04, total: 0.1 },
+		};
+		const cacheMiss: CacheMiss = { missedTokens: 105_000, missedCost: 0.36, idleMs: 0, modelChanged: false };
+		const entries: SessionEntry[] = [
+			{
+				type: "branch_summary",
+				id: "with-miss",
+				parentId: null,
+				timestamp: "2025-01-02T00:00:00Z",
+				fromId: "old-leaf",
+				summary: "summary with a measured miss",
+				usage,
+				cacheMiss,
+			},
+			{
+				type: "branch_summary",
+				id: "without-miss",
+				parentId: "with-miss",
+				timestamp: "2025-01-03T00:00:00Z",
+				fromId: "other-leaf",
+				summary: "warm summary",
+				usage,
+			},
+		];
+		const fakeThis = { renderSessionItems: vi.fn() };
+		const renderSessionEntries = Reflect.get(InteractiveMode.prototype, "renderSessionEntries") as (
+			this: typeof fakeThis,
+			entries: SessionEntry[],
+		) => void;
+
+		renderSessionEntries.call(fakeThis, entries);
+
+		expect(fakeThis.renderSessionItems).toHaveBeenCalledWith(
+			[
+				expect.objectContaining({ role: "branchSummary", summary: "summary with a measured miss" }),
+				{ type: "compaction_cost", kind: "branch_summary", usage, cacheMiss },
+				expect.objectContaining({ role: "branchSummary", summary: "warm summary" }),
+				{ type: "compaction_cost", kind: "branch_summary", usage },
+			],
+			{},
+		);
+	});
+
+	test("re-renders persisted branch-summary misses on rebuild when enabled, silent when off", () => {
+		const usage: Usage = {
+			input: 10,
+			output: 20,
+			cacheRead: 30,
+			cacheWrite: 40,
+			totalTokens: 100,
+			cost: { input: 0.01, output: 0.02, cacheRead: 0.03, cacheWrite: 0.04, total: 0.1 },
+		};
+		const cacheMiss: CacheMiss = { missedTokens: 105_000, missedCost: 0.36, idleMs: 0, modelChanged: false };
+		const notice = { type: "compaction_cost", kind: "branch_summary", usage, cacheMiss };
+		const renderSessionItems = Reflect.get(InteractiveMode.prototype, "renderSessionItems") as (
+			this: {
+				pendingTools: Map<string, unknown>;
+				settingsManager: { getShowCacheMissNotices(): boolean };
+				session: { modelRuntime: { getModel(): undefined } };
+				sessionManager: { getEntries(): SessionEntry[] };
+				chatContainer: unknown;
+				ui: { requestRender(): void };
+				addCompactionCostNotice(notice: unknown): void;
+				addCacheMissNotice(miss: CacheMiss): void;
+			},
+			items: unknown[],
+		) => void;
+		const fakeThis = (enabled: boolean) => ({
+			pendingTools: new Map<string, unknown>(),
+			settingsManager: { getShowCacheMissNotices: () => enabled },
+			session: { modelRuntime: { getModel: () => undefined } },
+			sessionManager: { getEntries: () => [] as SessionEntry[] },
+			chatContainer: {},
+			ui: { requestRender: vi.fn() },
+			addCompactionCostNotice: vi.fn(),
+			addCacheMissNotice: vi.fn(),
+		});
+
+		// Rebuild path (renderInitialMessages after chat.clear funnels here):
+		// the persisted miss re-renders alongside the cost notice.
+		const enabled = fakeThis(true);
+		renderSessionItems.call(enabled, [notice]);
+		expect(enabled.addCompactionCostNotice).toHaveBeenCalledWith(notice);
+		expect(enabled.addCacheMissNotice).toHaveBeenCalledWith(cacheMiss);
+
+		// Setting off: no miss notice; the cost renderer stays silent itself.
+		const disabled = fakeThis(false);
+		renderSessionItems.call(disabled, [notice]);
+		expect(disabled.addCompactionCostNotice).toHaveBeenCalledWith(notice);
+		expect(disabled.addCacheMissNotice).not.toHaveBeenCalled();
+	});
+
+	test("renders persisted branch-summary misses with the live miss copy and thresholds", () => {
+		const addCacheMissNotice = Reflect.get(InteractiveMode.prototype, "addCacheMissNotice") as (
+			this: { chatContainer: Container },
+			miss: CacheMiss,
+		) => void;
+
+		initTheme("dark");
+		const shown = { chatContainer: new Container() };
+		addCacheMissNotice.call(shown, {
+			missedTokens: 105_000,
+			missedCost: 0.36,
+			idleMs: 0,
+			modelChanged: false,
+		});
+		const output = stripAnsi(shown.chatContainer.render(120).join("\n"));
+		expect(output).toContain("Cache miss");
+		expect(output).toContain("re-billed");
+
+		const switched = { chatContainer: new Container() };
+		addCacheMissNotice.call(switched, {
+			missedTokens: 105_000,
+			missedCost: 0.36,
+			idleMs: 0,
+			modelChanged: true,
+		});
+		expect(stripAnsi(switched.chatContainer.render(120).join("\n"))).toContain("Cache miss after model switch");
+
+		// Below the display thresholds the persisted miss stays silent.
+		const quiet = { chatContainer: new Container() };
+		addCacheMissNotice.call(quiet, { missedTokens: 500, missedCost: 0, idleMs: 0, modelChanged: false });
+		expect(quiet.chatContainer.children).toHaveLength(0);
+	});
+
+	test.each([
+		{ missedTokens: 19_999, missedCost: 0.09, shown: false },
+		{ missedTokens: 20_000, missedCost: 0, shown: true },
+		{ missedTokens: 19_999, missedCost: 0.1, shown: true },
+		// Cost-only trigger: small miss, large overcharge.
+		{ missedTokens: 5_000, missedCost: 0.15, shown: true },
+		// Tokens-only trigger: large miss, unknown pricing.
+		{ missedTokens: 25_000, missedCost: 0, shown: true },
+	])("gates persisted misses at $missedTokens tokens + $$$missedCost", ({ missedTokens, missedCost, shown }) => {
+		const addCacheMissNotice = Reflect.get(InteractiveMode.prototype, "addCacheMissNotice") as (
+			this: { chatContainer: Container },
+			miss: CacheMiss,
+		) => void;
+		initTheme("dark");
+		const fakeThis = { chatContainer: new Container() };
+		addCacheMissNotice.call(fakeThis, { missedTokens, missedCost, idleMs: 0, modelChanged: false });
+		if (shown) {
+			expect(stripAnsi(fakeThis.chatContainer.render(120).join("\n"))).toContain("Cache miss");
+		} else {
+			expect(fakeThis.chatContainer.children).toHaveLength(0);
+		}
 	});
 
 	test("updates the working state when the same agent run resumes after compaction", async () => {

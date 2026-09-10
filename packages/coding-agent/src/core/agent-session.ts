@@ -53,6 +53,7 @@ import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+import { type CacheMiss, detectBranchSummaryCacheMiss } from "./cache-stats.ts";
 import {
 	type CompactionPreparation,
 	type CompactionResult,
@@ -3203,6 +3204,7 @@ export class AgentSession {
 			let summaryText: string | undefined;
 			let summaryDetails: unknown;
 			let summaryUsage: Usage | undefined;
+			let summaryCacheMiss: CacheMiss | undefined;
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
 				const model = this.model!;
 				const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(model);
@@ -3246,6 +3248,22 @@ export class AgentSession {
 					readFiles: result.readFiles || [],
 					modifiedFiles: result.modifiedFiles || [],
 				};
+				// Measure whether the summary request itself missed the live
+				// prompt-cache prefix. First sessions, truncated prefixes,
+				// and cold legacy (retention-none) requests warn exactly
+				// when the measured usage shows a miss; warm hits stay
+				// silent. Extension summaries skip this: their usage wasn't
+				// measured here and their model is unknown.
+				if (result.usage) {
+					summaryCacheMiss = detectBranchSummaryCacheMiss(
+						this.sessionManager.getEntries(),
+						result.usage,
+						requestModel.provider,
+						requestModel.id,
+						Date.now(),
+						this.modelRuntime,
+					);
+				}
 			} else if (extensionSummary) {
 				summaryText = extensionSummary.summary;
 				summaryDetails = extensionSummary.details;
@@ -3280,6 +3298,7 @@ export class AgentSession {
 					summaryDetails,
 					fromExtension,
 					summaryUsage,
+					summaryCacheMiss,
 				);
 				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
 
