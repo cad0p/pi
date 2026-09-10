@@ -228,6 +228,8 @@ type CompactionCostNotice = {
 	type: "compaction_cost";
 	kind: "compaction" | "branch_summary";
 	usage: Usage;
+	/** Measured cache miss paid by a branch summary, re-rendered on rebuilds. */
+	cacheMiss?: CacheMiss;
 };
 
 type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" }> | CompactionCostNotice;
@@ -3706,6 +3708,16 @@ export class InteractiveMode {
 				continue;
 			}
 			if (isCompactionCostNotice(item)) {
+				// Branch summaries follow the package pattern: hits read out
+				// in the footer (session R totals include summary usage via
+				// getSessionStats; verified R23M against E2E data) — only
+				// a measured miss warns. Compaction keeps its notice.
+				if (item.kind === "branch_summary") {
+					if (item.cacheMiss !== undefined && this.settingsManager.getShowCacheMissNotices()) {
+						this.addCacheMissNotice(item.cacheMiss);
+					}
+					continue;
+				}
 				this.addCompactionCostNotice(item);
 				continue;
 			}
@@ -3789,7 +3801,17 @@ export class InteractiveMode {
 			}
 			const messages = sessionEntryToContextMessages(entry);
 			if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage && messages.length > 0) {
-				return [...messages, { type: "compaction_cost", kind: entry.type, usage: entry.usage }];
+				return [
+					...messages,
+					{
+						type: "compaction_cost",
+						kind: entry.type,
+						usage: entry.usage,
+						...(entry.type === "branch_summary" && entry.cacheMiss !== undefined
+							? { cacheMiss: entry.cacheMiss }
+							: {}),
+					},
+				];
 			}
 			return messages;
 		});
@@ -3805,11 +3827,15 @@ export class InteractiveMode {
 
 		const { usage } = notice;
 		const tokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+		const cached = usage.cacheRead + usage.cacheWrite;
 		const cost = usage.cost.total >= 0.01 ? ` (~$${usage.cost.total.toFixed(2)})` : "";
 		const label = notice.kind === "compaction" ? "Compaction" : "Branch summary";
+		// Cached tokens are billed at a fraction of the full rate: break them
+		// out so a cache hit doesn't read as full-price tokens.
+		const cacheBreakdown = cached > 0 ? ` (${formatTokens(cached)} cache hit)` : "";
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(
-			new Text(theme.fg("warning", `${label}: ${formatTokens(tokens)} tokens billed${cost}`), 1, 0),
+			new Text(theme.fg("warning", `${label}: ${formatTokens(tokens)} tokens billed${cacheBreakdown}${cost}`), 1, 0),
 		);
 	}
 

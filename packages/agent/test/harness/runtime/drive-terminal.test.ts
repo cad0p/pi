@@ -80,6 +80,7 @@ async function seedLeftovers(session: Session, operationId: string, state: Opera
 			messages: [],
 			fileOps: { read: [], written: [], edited: [] },
 			totalTokens: 0,
+			firstMessageNumber: 1,
 		}),
 		storedValues.setValue(storedValues.pendingToolOutput(operationId, "invocation"), {
 			content: [{ type: "text", text: "partial" }],

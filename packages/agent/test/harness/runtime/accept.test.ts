@@ -478,7 +478,11 @@ describe("runtime atomic run acceptance", () => {
 					storedValues.operationPreparation(operation.meta.operationId, operation.state.task.taskId),
 					BACKGROUND_CONTEXT,
 				),
-			).toMatchObject({ value: { kind: "branch_summary", messages: [{ content: "source" }] } });
+			).toMatchObject({
+				// Full-history prefix (background "root" + branch "source") for cache
+				// matching; the scope sentence selects the branch, not the filter.
+				value: { kind: "branch_summary", messages: [{ content: "root" }, { content: "source" }] },
+			});
 		}
 		expect(storage.getCommitAttempts()).toHaveLength(1);
 		expect(starts).toHaveBeenCalledTimes(1);

@@ -27,7 +27,9 @@ export { readStoredCredential } from "./core/auth-storage.ts";
 // Compaction
 export {
 	type BranchPreparation,
+	type BranchSummaryRequestContext,
 	type BranchSummaryResult,
+	buildStructuredSummaryMessages,
 	type CollectEntriesResult,
 	type CompactionResult,
 	type CutPointResult,
@@ -44,9 +46,11 @@ export {
 	generateSummary,
 	generateSummaryWithUsage,
 	getLastAssistantUsage,
+	type PrepareBranchEntriesOptions,
 	prepareBranchEntries,
 	serializeConversation,
 	shouldCompact,
+	stripBoundaryOrphanToolResults,
 } from "./core/compaction/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 // Extension system

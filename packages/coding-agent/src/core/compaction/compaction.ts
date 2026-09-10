@@ -585,10 +585,13 @@ export async function completeSummarization(
 	callbacks?: RetryCallbacks,
 ): Promise<AssistantMessage> {
 	// Avoid cache writes for one-off summaries. Reuse caller-supplied routing when available;
-	// callers without a session ID, including branch summaries, receive a fresh routing ID.
+	// callers without a session ID, including legacy branch summaries, receive a fresh routing ID.
+	// Branch summaries reusing the live request prefix pass their own cacheRetention and
+	// sessionId through untouched (both built-in navigate paths always do this, so users get
+	// the cached path automatically; the parameter stays optional only for direct API callers).
 	const requestOptions: SimpleStreamOptions = {
 		...options,
-		cacheRetention: "none",
+		cacheRetention: options.cacheRetention ?? "none",
 		sessionId: options.sessionId ?? uuidv7(),
 	};
 	const produce = async (): Promise<AssistantMessage> =>

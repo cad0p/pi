@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { createModels, fauxAssistantMessage, fauxProvider, type MutableModels } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HarnessEvent, WatchHandle } from "../../../src/harness/agent-harness.ts";
@@ -134,6 +135,7 @@ function branchPreparation(): Extract<DurableStructuralPreparation, { kind: "bra
 		messages: [user("abandoned")],
 		fileOps: { read: [], written: [], edited: [] },
 		totalTokens: 10,
+		firstMessageNumber: 1,
 	};
 }
 
@@ -1344,6 +1346,171 @@ describe("runtime structural drive", () => {
 			fromHook: false,
 		});
 		expect(fixture.events.filter((event) => event.type === "usage")).toHaveLength(1);
+	});
+
+	it("persists a measured branch-summary cache miss on the entry", async () => {
+		const fixture = await createFixture();
+		const model = fixture.faux.getModel();
+		const ready = summaryReady(runScope(), navigationSummaryTask("target"), fixture.configuration);
+		const prior: AgentMessage = {
+			...fauxAssistantMessage("prior answer"),
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: 1,
+			usage: {
+				input: 0,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 100_000,
+				totalTokens: 100_020,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+		await installOperation(
+			fixture,
+			ready,
+			{ kind: "navigation", targetId: "target", summarize: true },
+			{
+				entries: [
+					{ id: "root", parentId: null, type: "message", message: user("root") },
+					{ id: "source", parentId: "root", type: "message", message: user("source") },
+					{ id: "target", parentId: "root", type: "message", message: user("target") },
+				],
+				tipId: "source",
+				preparation: {
+					taskId: "task",
+					value: {
+						...branchPreparation(),
+						// Warmed 100k prefix plus a long abandoned tail so the
+						// first summary request is cold by a wide margin.
+						messages: [prior, user(`abandoned work ${"x".repeat(12_000)}`)],
+						firstMessageNumber: 2,
+					},
+				},
+			},
+		);
+		fixture.faux.setResponses([fauxAssistantMessage("generated branch summary")]);
+
+		const result = await runStructuralGeneration(fixture.lane, fixture.drive, ready);
+		expect(result).toMatchObject({
+			kind: "settled",
+			outcome: { operationId, kind: "navigation", status: "completed" },
+		});
+		const entry = await fixture.session.getEntry("summary-entry", BACKGROUND_CONTEXT);
+		if (entry?.type !== "branch_summary") throw new Error("navigation summary entry is missing");
+		expect(entry.usage).toBeDefined();
+		// Cold first request: the warmed prefix was not read back from cache.
+		expect(entry.cacheMiss).toBeDefined();
+		expect(entry.cacheMiss?.missedTokens).toBeGreaterThan(1_024);
+		expect(entry.cacheMiss?.modelChanged).toBe(false);
+		// Below the display thresholds: persisted for rebuilds, but no display event.
+		expect(fixture.events.some((event) => event.type === "cache_miss")).toBe(false);
+	});
+
+	it("emits a cache_miss display event for a display-worthy branch-summary miss", async () => {
+		const fixture = await createFixture();
+		const model = fixture.faux.getModel();
+		const ready = summaryReady(runScope(), navigationSummaryTask("target"), fixture.configuration);
+		const prior: AgentMessage = {
+			...fauxAssistantMessage("prior answer"),
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: 1,
+			usage: {
+				input: 0,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 100_000,
+				totalTokens: 100_020,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+		await installOperation(
+			fixture,
+			ready,
+			{ kind: "navigation", targetId: "target", summarize: true },
+			{
+				entries: [
+					{ id: "root", parentId: null, type: "message", message: user("root") },
+					{ id: "source", parentId: "root", type: "message", message: user("source") },
+					{ id: "target", parentId: "root", type: "message", message: user("target") },
+				],
+				tipId: "source",
+				preparation: {
+					taskId: "task",
+					value: {
+						...branchPreparation(),
+						// ~15k-token cold prompt: the miss clears the 20k display bar.
+						messages: [prior, user(`abandoned work ${"x".repeat(60_000)}`)],
+						firstMessageNumber: 2,
+					},
+				},
+			},
+		);
+		fixture.faux.setResponses([fauxAssistantMessage("generated branch summary")]);
+
+		const result = await runStructuralGeneration(fixture.lane, fixture.drive, ready);
+		expect(result).toMatchObject({
+			kind: "settled",
+			outcome: { operationId, kind: "navigation", status: "completed" },
+		});
+		const entry = await fixture.session.getEntry("summary-entry", BACKGROUND_CONTEXT);
+		if (entry?.type !== "branch_summary") throw new Error("navigation summary entry is missing");
+		// Trace the persisted miss to the render call: entry_added carries the
+		// raw entry for transcript consumers, cache_miss is the display event.
+		const added = fixture.events.filter((event) => event.type === "entry_added");
+		expect(
+			added.some(
+				(event) =>
+					event.type === "entry_added" &&
+					event.entry.type === "branch_summary" &&
+					event.entry.cacheMiss !== undefined,
+			),
+		).toBe(true);
+		const notice = fixture.events.find((event) => event.type === "cache_miss");
+		expect(notice).toMatchObject({
+			lane: "main",
+			runId: operationId,
+			entryId: "summary-entry",
+			modelChanged: false,
+		});
+		if (notice?.type !== "cache_miss") throw new Error("cache_miss display event is missing");
+		expect(notice.missedTokens).toBeGreaterThanOrEqual(20_000);
+		expect(notice.missedTokens).toBe(entry.cacheMiss?.missedTokens);
+		expect(notice.missedCost).toBe(entry.cacheMiss?.missedCost);
+		expect(notice.idleMs).toBe(entry.cacheMiss?.idleMs);
+	});
+
+	it("leaves branch-summary entries without a previous request silent", async () => {
+		const fixture = await createFixture();
+		const ready = summaryReady(runScope(), navigationSummaryTask("target"), fixture.configuration);
+		await installOperation(
+			fixture,
+			ready,
+			{ kind: "navigation", targetId: "target", summarize: true },
+			{
+				entries: [
+					{ id: "root", parentId: null, type: "message", message: user("root") },
+					{ id: "source", parentId: "root", type: "message", message: user("source") },
+					{ id: "target", parentId: "root", type: "message", message: user("target") },
+				],
+				tipId: "source",
+				preparation: { taskId: "task", value: branchPreparation() },
+			},
+		);
+		fixture.faux.setResponses([fauxAssistantMessage("generated branch summary")]);
+
+		expect(await runStructuralGeneration(fixture.lane, fixture.drive, ready)).toMatchObject({
+			kind: "settled",
+			outcome: { operationId, kind: "navigation", status: "completed" },
+		});
+		const entry = await fixture.session.getEntry("summary-entry", BACKGROUND_CONTEXT);
+		if (entry?.type !== "branch_summary") throw new Error("navigation summary entry is missing");
+		// Cold response but no previous request to miss against: stay silent.
+		expect(entry.usage).toBeDefined();
+		expect(entry.cacheMiss).toBeUndefined();
 	});
 
 	it("consumes an orphaned structural attempt and never resumes its nested request", async () => {

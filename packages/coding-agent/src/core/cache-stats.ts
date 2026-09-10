@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "./session-manager.ts";
 
 /**
@@ -40,9 +40,12 @@ interface PreviousRequest {
 	modelKey: string;
 	timestamp: number;
 	/**
-	 * Sticky: some earlier request in this scan segment reported cache activity.
-	 * Distinguishes a total miss on a cache-read-only provider (OpenAI-style,
-	 * writes unreported) from a provider that never reports caching at all.
+	 * Sticky: some earlier request in this session reported cache activity.
+	 * Session-scoped (never reset by context boundaries): provider cache
+	 * capability does not change across compactions, while the prompt
+	 * baseline legitimately does. Distinguishes a total miss on a
+	 * cache-read-only provider (OpenAI-style, writes unreported) from a
+	 * provider that never reports caching at all.
 	 */
 	reportedCache: boolean;
 }
@@ -55,7 +58,7 @@ interface PreviousRequest {
  */
 function detectMiss(
 	prev: PreviousRequest | undefined,
-	message: AssistantMessage,
+	message: Pick<AssistantMessage, "provider" | "model" | "usage" | "timestamp">,
 	models: ModelPriceSource,
 ): CacheMiss | undefined {
 	const usage = message.usage;
@@ -104,17 +107,39 @@ function asPreviousRequest(message: AssistantMessage, reportedCache: boolean): P
 function scan(
 	entries: SessionEntry[],
 	models: ModelPriceSource,
+	// Probe-only override: summary probes pass true so the parent baseline
+	// survives branch summaries (their request reuses the live prefix — see
+	// generateBranchSummaryWithRequest in compaction/branch-summarization.ts).
+	// Live-turn accounting always uses the default false.
+	keepBaselineAcrossBranchSummary = false,
 ): { prev: PreviousRequest | undefined; totals: CacheWasteTotals; misses: Map<AssistantMessage, CacheMiss> } {
 	let prev: PreviousRequest | undefined;
 	const totals: CacheWasteTotals = { missedTokens: 0, missedCost: 0, missCount: 0 };
 	const misses = new Map<AssistantMessage, CacheMiss>();
 
+	// Session-level cache capability: any measured cache activity (assistant
+	// turns AND summary requests) proves the provider reports caching, so a
+	// later zero-read is a real miss even across a context boundary.
+	let everReportedCache = false;
 	for (const entry of entries) {
-		if (entry.type === "compaction" || entry.type === "branch_summary") {
+		if (entry.type === "compaction" || (entry.type === "branch_summary" && !keepBaselineAcrossBranchSummary)) {
 			// The context legitimately changed; the next turn's prompt is new content,
 			// not re-billed content. Model switches are NOT exempt: they re-bill the
 			// full prompt and should be counted.
+			if (entry.usage && entry.usage.cacheRead + entry.usage.cacheWrite > 0) {
+				everReportedCache = true;
+			}
 			prev = undefined;
+			continue;
+		}
+		if (entry.type === "branch_summary") {
+			// Probe-only path (keepBaselineAcrossBranchSummary): the summary
+			// request reuses the live prompt-cache prefix, so the parent baseline
+			// survives. Fold cache activity into the session capability flag but
+			// never reset prev and never become prev (only assistant messages do).
+			if (entry.usage && entry.usage.cacheRead + entry.usage.cacheWrite > 0) {
+				everReportedCache = true;
+			}
 			continue;
 		}
 		if (entry.type === "message" && entry.message.role === "assistant") {
@@ -125,7 +150,10 @@ function scan(
 				totals.missCount += 1;
 				misses.set(entry.message, miss);
 			}
-			prev = asPreviousRequest(entry.message, prev?.reportedCache ?? false) ?? prev;
+			if (entry.message.usage.cacheRead + entry.message.usage.cacheWrite > 0) {
+				everReportedCache = true;
+			}
+			prev = asPreviousRequest(entry.message, (prev?.reportedCache ?? false) || everReportedCache) ?? prev;
 		}
 	}
 	return { prev, totals, misses };
@@ -161,4 +189,28 @@ export function detectCacheMiss(
 	models: ModelPriceSource,
 ): CacheMiss | undefined {
 	return detectMiss(scan(entries, models).prev, message, models);
+}
+
+/**
+ * Detect a cache miss on a just-completed branch-summary response from its
+ * measured usage. `entries` is the session before the summary entry is
+ * appended. Production seam for the branch-summary generation sites (classic
+ * AgentSession.navigateTree); the legacy retention-none path flows through
+ * the same measurement with no per-path special-casing.
+ */
+export function detectBranchSummaryCacheMiss(
+	entries: SessionEntry[],
+	responseUsage: Usage,
+	provider: string,
+	model: string,
+	timestamp: number,
+	models: ModelPriceSource,
+): CacheMiss | undefined {
+	const { prev } = scan(entries, models, true);
+	// Live-turn accounting counts model switches as misses; summary probes
+	// suppress them instead. A cold summary right after a switch is expected
+	// re-billing (the new provider/model cannot read the previous prefix),
+	// not an actionable miss — warning would spam on config-driven switches.
+	if (prev && prev.modelKey !== `${provider}/${model}`) return undefined;
+	return detectMiss(prev, { provider, model, usage: responseUsage, timestamp }, models);
 }

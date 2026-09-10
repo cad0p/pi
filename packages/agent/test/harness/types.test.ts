@@ -423,6 +423,7 @@ it("covers Part 5 results, events, hooks, snapshots, tools, and stream options",
 		| "navigation_end"
 		| "lane_created"
 		| "usage"
+		| "cache_miss"
 	>();
 	expectTypeOf<HookName>().toEqualTypeOf<
 		| "before_run"

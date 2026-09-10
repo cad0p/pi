@@ -189,6 +189,7 @@ const EVENT_TYPES = [
 	"navigation_end",
 	"lane_created",
 	"usage",
+	"cache_miss",
 ] as const;
 
 const operationStartAttributes = {

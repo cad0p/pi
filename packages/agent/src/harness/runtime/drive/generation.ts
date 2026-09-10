@@ -53,7 +53,7 @@ function configurationError(
 	};
 }
 
-async function resolveSystemPrompt<TContext extends object | undefined>(
+export async function resolveSystemPrompt<TContext extends object | undefined>(
 	lane: Lane<TContext>,
 	context: Context,
 ): Promise<string> {
@@ -63,6 +63,33 @@ async function resolveSystemPrompt<TContext extends object | undefined>(
 	const source = config.toolContext;
 	const toolContext = typeof source === "function" ? await source(context) : source;
 	return config.systemPrompt(toolContext as TContext, context);
+}
+
+/**
+ * Map configured tools to provider tool definitions in active-tool order.
+ * Shared by live generations and cache-preserving summary requests so both
+ * send byte-identical tool arrays for the same configuration.
+ */
+export function resolveActiveTools(
+	configTools: readonly {
+		name: string;
+		description: string;
+		parameters: Tool["parameters"];
+		constrainedSampling?: Tool["constrainedSampling"];
+	}[],
+	activeToolNames: readonly string[],
+): Tool[] {
+	const toolsByName = new Map(configTools.map((tool) => [tool.name, tool]));
+	return activeToolNames.map((name) => {
+		const tool = toolsByName.get(name);
+		if (tool === undefined) throw new SessionInvariantError(`Configured tool ${name} disappeared during resolution`);
+		return {
+			name: tool.name,
+			description: tool.description,
+			parameters: tool.parameters,
+			...(tool.constrainedSampling === undefined ? {} : { constrainedSampling: tool.constrainedSampling }),
+		};
+	});
 }
 
 async function prepareGeneration<TContext extends object | undefined>(
@@ -87,16 +114,7 @@ async function prepareGeneration<TContext extends object | undefined>(
 			error: configurationError("configured_tools_unavailable", { tools: missingTools }),
 		};
 	}
-	const tools: Tool[] = generation.generationContext.configuration.activeToolNames.map((name) => {
-		const tool = toolsByName.get(name);
-		if (tool === undefined) throw new SessionInvariantError(`Configured tool ${name} disappeared during resolution`);
-		return {
-			name: tool.name,
-			description: tool.description,
-			parameters: tool.parameters,
-			...(tool.constrainedSampling === undefined ? {} : { constrainedSampling: tool.constrainedSampling }),
-		};
-	});
+	const tools = resolveActiveTools(config.tools, generation.generationContext.configuration.activeToolNames);
 
 	const messages = await readBoundedContext(lane, drive, generation);
 	if (messages.kind === "cancel_requested") return messages;

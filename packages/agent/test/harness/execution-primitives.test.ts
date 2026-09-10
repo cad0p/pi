@@ -323,6 +323,7 @@ describe("HookRegistry", () => {
 					messages: [],
 					fileOps: { read: new Set(), written: new Set(), edited: new Set() },
 					totalTokens: 0,
+					firstMessageNumber: 1,
 				},
 			},
 			createGate().gate,
