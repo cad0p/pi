@@ -3823,11 +3823,15 @@ export class InteractiveMode {
 
 		const { usage } = notice;
 		const tokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+		const cached = usage.cacheRead + usage.cacheWrite;
 		const cost = usage.cost.total >= 0.01 ? ` (~$${usage.cost.total.toFixed(2)})` : "";
 		const label = notice.kind === "compaction" ? "Compaction" : "Branch summary";
+		// Cached tokens are billed at a fraction of the full rate: break them
+		// out so a cache hit doesn't read as full-price tokens.
+		const cacheBreakdown = cached > 0 ? ` (${formatTokens(cached)} cache hit)` : "";
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(
-			new Text(theme.fg("warning", `${label}: ${formatTokens(tokens)} tokens billed${cost}`), 1, 0),
+			new Text(theme.fg("warning", `${label}: ${formatTokens(tokens)} tokens billed${cacheBreakdown}${cost}`), 1, 0),
 		);
 	}
 
