@@ -107,6 +107,11 @@ function asPreviousRequest(message: AssistantMessage, reportedCache: boolean): P
 function scan(
 	entries: SessionEntry[],
 	models: ModelPriceSource,
+	// Probe-only override: summary probes pass true so the parent baseline
+	// survives branch summaries (their request reuses the live prefix — see
+	// generateBranchSummaryWithRequest in compaction/branch-summarization.ts).
+	// Live-turn accounting always uses the default false.
+	keepBaselineAcrossBranchSummary = false,
 ): { prev: PreviousRequest | undefined; totals: CacheWasteTotals; misses: Map<AssistantMessage, CacheMiss> } {
 	let prev: PreviousRequest | undefined;
 	const totals: CacheWasteTotals = { missedTokens: 0, missedCost: 0, missCount: 0 };
@@ -117,7 +122,7 @@ function scan(
 	// later zero-read is a real miss even across a context boundary.
 	let everReportedCache = false;
 	for (const entry of entries) {
-		if (entry.type === "compaction" || entry.type === "branch_summary") {
+		if (entry.type === "compaction" || (entry.type === "branch_summary" && !keepBaselineAcrossBranchSummary)) {
 			// The context legitimately changed; the next turn's prompt is new content,
 			// not re-billed content. Model switches are NOT exempt: they re-bill the
 			// full prompt and should be counted.
@@ -125,6 +130,16 @@ function scan(
 				everReportedCache = true;
 			}
 			prev = undefined;
+			continue;
+		}
+		if (entry.type === "branch_summary") {
+			// Probe-only path (keepBaselineAcrossBranchSummary): the summary
+			// request reuses the live prompt-cache prefix, so the parent baseline
+			// survives. Fold cache activity into the session capability flag but
+			// never reset prev and never become prev (only assistant messages do).
+			if (entry.usage && entry.usage.cacheRead + entry.usage.cacheWrite > 0) {
+				everReportedCache = true;
+			}
 			continue;
 		}
 		if (entry.type === "message" && entry.message.role === "assistant") {
@@ -191,5 +206,11 @@ export function detectBranchSummaryCacheMiss(
 	timestamp: number,
 	models: ModelPriceSource,
 ): CacheMiss | undefined {
-	return detectMiss(scan(entries, models).prev, { provider, model, usage: responseUsage, timestamp }, models);
+	const { prev } = scan(entries, models, true);
+	// Live-turn accounting counts model switches as misses; summary probes
+	// suppress them instead. A cold summary right after a switch is expected
+	// re-billing (the new provider/model cannot read the previous prefix),
+	// not an actionable miss — warning would spam on config-driven switches.
+	if (prev && prev.modelKey !== `${provider}/${model}`) return undefined;
+	return detectMiss(prev, { provider, model, usage: responseUsage, timestamp }, models);
 }

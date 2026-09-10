@@ -17,7 +17,13 @@ import type { BranchSummaryCacheMiss as HarnessBranchSummaryCacheMiss, StreamFn 
 import { createAssistantMessageEventStream, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it } from "vitest";
-import { type CacheMiss, detectBranchSummaryCacheMiss, type ModelPriceSource } from "../src/core/cache-stats.ts";
+import {
+	type CacheMiss,
+	collectCacheMisses,
+	computeCacheWaste,
+	detectBranchSummaryCacheMiss,
+	type ModelPriceSource,
+} from "../src/core/cache-stats.ts";
 import { generateBranchSummary } from "../src/core/compaction/index.ts";
 import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import { getUsageCostBreakdown } from "../src/core/usage-totals.ts";
@@ -120,6 +126,23 @@ describe("branch summary cache-miss detection", () => {
 		expect(detect(history, usage({ input: 63_000 }))?.missedTokens).toBe(2_000);
 	});
 
+	it("stays silent on a warm second summary (parent baseline read back)", () => {
+		const history = [
+			assistantEntry("a", null, usage({ cacheWrite: 100_000 }), 0),
+			summaryEntry("s", usage({ input: 500, cacheRead: 61_425 }), 1),
+			assistantEntry("b", "s", usage({ input: 2_000 }), 2),
+		];
+		// Warm: the probe reads back the 2k parent baseline.
+		expect(detect(history, usage({ input: 2_000, cacheRead: 61_000 }))).toBeUndefined();
+	});
+
+	it("stays silent-first after a compaction boundary (baseline invalid)", () => {
+		const compaction = { type: "compaction", id: "c", parentId: null, timestamp: "" } as SessionEntry;
+		const history = [assistantEntry("a", null, usage({ cacheWrite: 100_000 }), 0), compaction];
+		// Compaction rewrites the prompt: the cold probe is new content, not a miss.
+		expect(detect(history, usage({ input: 63_000 }))).toBeUndefined();
+	});
+
 	it("still skips cache-less providers across a summary boundary", () => {
 		const history = [
 			assistantEntry("a", null, usage({ input: 100_000 }), 0),
@@ -147,10 +170,11 @@ describe("branch summary cache-miss detection", () => {
 			probe.timestamp,
 			models,
 		);
+		// Silent via provider-switch suppression (as well as the warm read-back).
 		expect(miss).toBeUndefined();
 	});
 
-	it("flags a cold response after a model switch", () => {
+	it("stays silent on a cold response after a model switch (expected re-billing)", () => {
 		const probe = probeUsage(usage({ input: 100_000 }));
 		const miss = detectBranchSummaryCacheMiss(
 			warmedEntries,
@@ -160,8 +184,24 @@ describe("branch summary cache-miss detection", () => {
 			probe.timestamp,
 			models,
 		);
-		expect(miss?.missedTokens).toBe(100_000);
-		expect(miss?.modelChanged).toBe(true);
+		// A new model cannot read the previous prefix: expected re-billing,
+		// not an actionable miss.
+		expect(miss).toBeUndefined();
+	});
+
+	it("ignores branch summaries in live-turn totals", () => {
+		const history = [
+			assistantEntry("a", null, usage({ cacheWrite: 100_000 }), 0),
+			summaryEntry("s", usage({ input: 500, cacheRead: 61_425 }), 1),
+			assistantEntry("b", "s", usage({ input: 2_000 }), 2),
+		];
+		// Live accounting still resets at the summary boundary: the post-summary
+		// turn is new content, and the summary usage itself is never a miss.
+		expect(computeCacheWaste(history, models)).toMatchObject({
+			missedTokens: 0,
+			missCount: 0,
+		});
+		expect(collectCacheMisses(history, models).size).toBe(0);
 	});
 
 	it("measures the usage returned by the generator instead of the request shape", async () => {
@@ -335,7 +375,7 @@ describe("branch summary cache-miss navigation wiring", () => {
 		expect(result.summaryEntry?.cacheMiss?.missedTokens).toBeGreaterThan(1_024);
 	});
 
-	it("flags a model switch measured on navigateTree", async () => {
+	it("stays silent on a model switch measured on navigateTree", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		// Seed history on a different model than the faux summarizer runs.
@@ -346,8 +386,9 @@ describe("branch summary cache-miss navigation wiring", () => {
 		harness.setResponses([fauxAssistantMessage("## Goal\nabandoned summary")]);
 
 		const result = await harness.session.navigateTree(targetId, { summarize: true });
-		expect(result.summaryEntry?.cacheMiss).toBeDefined();
-		expect(result.summaryEntry?.cacheMiss?.modelChanged).toBe(true);
+		// A new model cannot read the previous prefix: expected re-billing,
+		// not an actionable miss.
+		expect(result.summaryEntry?.cacheMiss).toBeUndefined();
 	});
 
 	it("records no miss for extension-provided summaries", async () => {

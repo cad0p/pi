@@ -112,8 +112,8 @@ function asPreviousRequest(message: AssistantMessage, reportedCache: boolean): P
 /**
  * Detect a cache miss on a just-completed branch-summary response.
  * `messages` is the chronological preparation history (background + branch);
- * prior summary messages reset the scan the same way compaction and
- * branch_summary entries reset the classic scan.
+ * prior branch summaries chain (the summary request reuses the live prefix,
+ * so the parent baseline survives) while compactions still reset the scan.
  */
 export function detectBranchSummaryCacheMiss(
 	messages: readonly AgentMessage[],
@@ -126,10 +126,17 @@ export function detectBranchSummaryCacheMiss(
 	let prev: PreviousRequest | undefined;
 	let everReportedCache = false;
 	for (const message of messages) {
-		if (message.role === "branchSummary" || message.role === "compactionSummary") {
-			// The context legitimately changed; the summary prompt after this
-			// is new content, not re-billed content.
+		if (message.role === "compactionSummary") {
+			// Pre-compaction prompts are rewritten, so the baseline is invalid:
+			// the next turn's prompt is new content, not re-billed content.
 			prev = undefined;
+			continue;
+		}
+		if (message.role === "branchSummary") {
+			// Branch summaries reuse the live lane prefix (see the summary
+			// preparation in runtime/lane.ts), so the parent baseline survives
+			// (probe-only loop: no live-turn totals to protect). Never reset
+			// prev and never become prev (only assistant messages do).
 			continue;
 		}
 		if (message.role === "assistant") {
@@ -139,5 +146,10 @@ export function detectBranchSummaryCacheMiss(
 			prev = asPreviousRequest(message, (prev?.reportedCache ?? false) || everReportedCache) ?? prev;
 		}
 	}
+	// Live-turn accounting counts model switches as misses; summary probes
+	// suppress them instead. A cold summary right after a switch is expected
+	// re-billing (the new provider/model cannot read the previous prefix),
+	// not an actionable miss — warning would spam on config-driven switches.
+	if (prev && prev.modelKey !== `${response.provider}/${response.model}`) return undefined;
 	return detectMiss(prev, response, models);
 }

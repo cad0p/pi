@@ -118,10 +118,10 @@ describe("detectBranchSummaryCacheMiss", () => {
 		expect(detectBranchSummaryCacheMiss(history, summaryMessage(usage({ input: 110_000 })), models)).toBeUndefined();
 	});
 
-	it("resets the scan at prior summaries and measures from the newer segment", () => {
+	it("resets the scan at prior compaction summaries and measures from the newer segment", () => {
 		const history: AgentMessage[] = [
 			assistantMessage(usage({ cacheWrite: 100_000 })),
-			{ role: "branchSummary", summary: "older branch", fromId: "old", timestamp: 2 },
+			{ role: "compactionSummary", summary: "compacted", tokensBefore: 1_000, timestamp: 2 },
 			userMessage("newer work"),
 			assistantMessage(usage({ cacheWrite: 50_000 }), { timestamp: 3 }),
 		];
@@ -133,6 +133,61 @@ describe("detectBranchSummaryCacheMiss", () => {
 		// Previous prompt is the post-reset 50k turn, not the pre-reset 100k one.
 		expect(miss?.missedTokens).toBe(50_000);
 		expect(miss?.idleMs).toBe(1);
+	});
+
+	it("keeps the parent baseline across a branch summary (no reset)", () => {
+		const history: AgentMessage[] = [
+			assistantMessage(usage({ cacheWrite: 100_000 })),
+			{ role: "branchSummary", summary: "older branch", fromId: "old", timestamp: 2 },
+			userMessage("newer work"),
+			assistantMessage(usage({ input: 2_000 }), { timestamp: 3 }),
+		];
+		// Branch summaries reuse the live prefix: the probe measures against the
+		// 2k parent baseline, min(parent 2k, probe 60k).
+		const miss = detectBranchSummaryCacheMiss(history, summaryMessage(usage({ input: 60_000 })), models);
+		expect(miss?.missedTokens).toBe(2_000);
+	});
+
+	it("measures a miss on a consecutive summary without an intervening turn", () => {
+		const history: AgentMessage[] = [
+			assistantMessage(usage({ cacheWrite: 100_000 })),
+			{ role: "branchSummary", summary: "older branch", fromId: "old", timestamp: 2 },
+		];
+		// No reset at branch summaries: the parent 100k baseline survives.
+		const miss = detectBranchSummaryCacheMiss(history, summaryMessage(usage({ input: 60_000 })), models);
+		expect(miss?.missedTokens).toBe(60_000);
+	});
+
+	it("stays silent-first after a compaction summary (baseline invalid)", () => {
+		const history: AgentMessage[] = [
+			assistantMessage(usage({ cacheWrite: 100_000 })),
+			{ role: "compactionSummary", summary: "compacted", tokensBefore: 1_000, timestamp: 2 },
+		];
+		// Pre-compaction prompts are rewritten: the cold probe is new content.
+		expect(detectBranchSummaryCacheMiss(history, summaryMessage(usage({ input: 60_000 })), models)).toBeUndefined();
+	});
+
+	it("stays silent on a warm response across a branch summary", () => {
+		const history: AgentMessage[] = [
+			assistantMessage(usage({ cacheWrite: 100_000 })),
+			{ role: "branchSummary", summary: "older branch", fromId: "old", timestamp: 2 },
+			userMessage("newer work"),
+			assistantMessage(usage({ input: 2_000 }), { timestamp: 3 }),
+		];
+		// Warm: the probe reads back the 2k parent baseline.
+		expect(
+			detectBranchSummaryCacheMiss(history, summaryMessage(usage({ input: 2_000, cacheRead: 61_000 })), models),
+		).toBeUndefined();
+	});
+
+	it("still skips cache-less providers across a branch summary", () => {
+		const history: AgentMessage[] = [
+			assistantMessage(usage({ input: 100_000 })),
+			{ role: "branchSummary", summary: "older branch", fromId: "old", timestamp: 2 },
+			userMessage("newer work"),
+			assistantMessage(usage({ input: 2_000 }), { timestamp: 3 }),
+		];
+		expect(detectBranchSummaryCacheMiss(history, summaryMessage(usage({ input: 60_000 })), models)).toBeUndefined();
 	});
 
 	it("keeps session cache capability across a reset (E2E: earlier summary hit, later full miss)", () => {
@@ -158,14 +213,15 @@ describe("detectBranchSummaryCacheMiss", () => {
 		expect(detectBranchSummaryCacheMiss(history, summaryMessage(usage({ input: 60_000 })), models)).toBeUndefined();
 	});
 
-	it("flags model switches on detected misses", () => {
+	it("stays silent on a cold response after a model switch (expected re-billing)", () => {
 		const miss = detectBranchSummaryCacheMiss(
 			warmedHistory,
 			{ ...summaryMessage(usage({ input: 100_000 })), model: "other-model" },
 			models,
 		);
-		expect(miss?.missedTokens).toBe(100_000);
-		expect(miss?.modelChanged).toBe(true);
+		// A new model cannot read the previous prefix: expected re-billing,
+		// not an actionable miss.
+		expect(miss).toBeUndefined();
 	});
 
 	it.each([
@@ -182,6 +238,7 @@ describe("detectBranchSummaryCacheMiss", () => {
 	});
 
 	it("stays silent on a warm response after a model switch", () => {
+		// Silent via provider-switch suppression (as well as the warm read-back).
 		expect(
 			detectBranchSummaryCacheMiss(
 				warmedHistory,
