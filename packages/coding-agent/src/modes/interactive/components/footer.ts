@@ -88,18 +88,31 @@ export class FooterComponent implements Component {
 		const usageTotals = createUsageTotals();
 		let latestCacheHitRate: number | undefined;
 
+		// CH tracks the latest request (assistant turn or summary), since a
+		// branch summary after a navigate is the most recent model call.
+		let latestRequestAt = -1;
 		for (const entry of this.session.sessionManager.getEntries()) {
+			const entryAt = Date.parse(entry.timestamp);
+			const at = Number.isNaN(entryAt) ? latestRequestAt : entryAt;
 			if (entry.type === "message" && entry.message.role === "assistant") {
 				addUsageToTotals(usageTotals, entry.message.usage);
 
 				const latestPromptTokens =
 					entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
-				latestCacheHitRate =
-					latestPromptTokens > 0 ? (entry.message.usage.cacheRead / latestPromptTokens) * 100 : undefined;
+				if (at >= latestRequestAt) {
+					latestRequestAt = at;
+					latestCacheHitRate =
+						latestPromptTokens > 0 ? (entry.message.usage.cacheRead / latestPromptTokens) * 100 : undefined;
+				}
 			} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
 				addUsageToTotals(usageTotals, entry.message.usage);
 			} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
 				addUsageToTotals(usageTotals, entry.usage);
+				const summaryPromptTokens = entry.usage.input + entry.usage.cacheRead + entry.usage.cacheWrite;
+				if (summaryPromptTokens > 0 && at >= latestRequestAt) {
+					latestRequestAt = at;
+					latestCacheHitRate = (entry.usage.cacheRead / summaryPromptTokens) * 100;
+				}
 			}
 		}
 

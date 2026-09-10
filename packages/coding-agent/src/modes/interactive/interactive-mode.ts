@@ -3708,13 +3708,17 @@ export class InteractiveMode {
 				continue;
 			}
 			if (isCompactionCostNotice(item)) {
-				this.addCompactionCostNotice(item);
-				// Re-render a persisted branch-summary miss on rebuilds
-				// (navigate/rewind, resume). Same setting gate and display
-				// thresholds as live misses; off stays today's behavior.
-				if (item.cacheMiss !== undefined && this.settingsManager.getShowCacheMissNotices()) {
-					this.addCacheMissNotice(item.cacheMiss);
+				// Branch summaries follow the package pattern: hits read out
+				// in the footer (session R totals include summary usage via
+				// getSessionStats; verified R23M against E2E data) — only
+				// a measured miss warns. Compaction keeps its notice.
+				if (item.kind === "branch_summary") {
+					if (item.cacheMiss !== undefined && this.settingsManager.getShowCacheMissNotices()) {
+						this.addCacheMissNotice(item.cacheMiss);
+					}
+					continue;
 				}
+				this.addCompactionCostNotice(item);
 				continue;
 			}
 

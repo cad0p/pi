@@ -39,7 +39,6 @@ describe("InteractiveMode compaction events", () => {
 		});
 		const output = stripAnsi(enabled.chatContainer.render(120).join("\n"));
 		expect(output).toContain("Compaction: 100 tokens billed (70 cache hit) (~$0.13)");
-		expect(output).toContain("Branch summary: 100 tokens billed (70 cache hit) (~$0.13)");
 
 		const disabled = {
 			chatContainer: new Container(),
@@ -284,16 +283,17 @@ describe("InteractiveMode compaction events", () => {
 		});
 
 		// Rebuild path (renderInitialMessages after chat.clear funnels here):
-		// the persisted miss re-renders alongside the cost notice.
+		// branch summaries follow the package pattern (hits read out in the
+		// footer) — no billed notice, only the persisted miss re-renders.
 		const enabled = fakeThis(true);
 		renderSessionItems.call(enabled, [notice]);
-		expect(enabled.addCompactionCostNotice).toHaveBeenCalledWith(notice);
+		expect(enabled.addCompactionCostNotice).not.toHaveBeenCalled();
 		expect(enabled.addCacheMissNotice).toHaveBeenCalledWith(cacheMiss);
 
-		// Setting off: no miss notice; the cost renderer stays silent itself.
+		// Setting off: neither notice renders.
 		const disabled = fakeThis(false);
 		renderSessionItems.call(disabled, [notice]);
-		expect(disabled.addCompactionCostNotice).toHaveBeenCalledWith(notice);
+		expect(disabled.addCompactionCostNotice).not.toHaveBeenCalled();
 		expect(disabled.addCacheMissNotice).not.toHaveBeenCalled();
 	});
 
