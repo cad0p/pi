@@ -260,7 +260,7 @@ Use this EXACT format:
 ## Next Steps
 1. [What should happen next to continue this work]
 
-Keep each top-level section under about 800 characters. Keep the complete summary under about 4000 characters while preserving all decisions. Preserve exact file paths, function names, and error messages.`;
+Keep each section concise. Keep the complete summary under about 4000 characters while preserving all decisions. Preserve exact file paths, function names, and error messages.`;
 
 /** Generate a summary for abandoned branch entries. */
 export function generateBranchSummary(
