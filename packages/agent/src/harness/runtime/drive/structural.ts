@@ -96,6 +96,7 @@ export function durableBranchPreparation(
 		messages: preparation.messages,
 		fileOps: durableFileOperations(preparation.fileOps),
 		totalTokens: preparation.totalTokens,
+		firstMessageNumber: preparation.firstMessageNumber,
 	};
 }
 
@@ -129,6 +130,7 @@ function branchPreparation(
 		messages: preparation.messages,
 		fileOps: fileOperations(preparation.fileOps),
 		totalTokens: preparation.totalTokens,
+		firstMessageNumber: preparation.firstMessageNumber,
 	};
 }
 

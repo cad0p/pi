@@ -56,6 +56,13 @@ export interface BranchPreparation {
 	fileOps: FileOperations;
 	/** Total estimated tokens in messages */
 	totalTokens: number;
+	/**
+	 * 1-based number of the first branch message within `messages`
+	 * (message numbering starts at 1 and excludes the system prompt).
+	 * Pre-branch background messages precede it; they are sent so the
+	 * request shares the live turns' cache prefix, not to be summarized.
+	 */
+	firstMessageNumber: number;
 }
 
 export interface CollectEntriesResult {
@@ -63,6 +70,12 @@ export interface CollectEntriesResult {
 	entries: SessionEntry[];
 	/** Common ancestor between old and new position, if any */
 	commonAncestorId: string | null;
+	/**
+	 * Pre-branch background entries (root-first, ending at the common
+	 * ancestor), in chronological order. Sent with the cache-preserving
+	 * request so its prefix matches live turns; never summarized.
+	 */
+	prefixEntries: SessionEntry[];
 }
 
 export interface GenerateBranchSummaryOptions {
@@ -105,6 +118,14 @@ export interface GenerateBranchSummaryOptions {
 	 * with live turns. When omitted, the legacy standalone request is used.
 	 */
 	requestContext?: BranchSummaryRequestContext;
+	/**
+	 * Pre-branch background entries (chronological, ending at the common
+	 * ancestor) for the cache-preserving path. Sent ahead of `entries` so
+	 * the request prefix matches live turns; never summarized (the scope
+	 * sentence selects the branch via `{first}`). The legacy path ignores
+	 * this and stays branch-only.
+	 */
+	prefixEntries?: SessionEntry[];
 }
 
 /**
@@ -143,7 +164,7 @@ export function collectEntriesForBranchSummary(
 ): CollectEntriesResult {
 	// If no old position, nothing to summarize
 	if (!oldLeafId) {
-		return { entries: [], commonAncestorId: null };
+		return { entries: [], prefixEntries: [], commonAncestorId: null };
 	}
 
 	// Find common ancestor (deepest node that's on both paths)
@@ -173,7 +194,14 @@ export function collectEntriesForBranchSummary(
 	// Reverse to get chronological order
 	entries.reverse();
 
-	return { entries, commonAncestorId };
+	// Pre-branch background (root-first full branch, everything before the
+	// branch start, ancestor included): the cache-preserving request sends it
+	// so its prefix matches live turns. Never summarized.
+	const fullBranch = session.getBranch(oldLeafId);
+	const branchStartIdx = entries.length > 0 ? fullBranch.findIndex((entry) => entry.id === entries[0].id) : -1;
+	const prefixEntries = branchStartIdx > 0 ? fullBranch.slice(0, branchStartIdx) : [];
+
+	return { entries, prefixEntries, commonAncestorId };
 }
 
 // ============================================================================
@@ -231,6 +259,13 @@ export interface PrepareBranchEntriesOptions {
 	 * turns byte-for-byte; the legacy serialized path keeps skipping them.
 	 */
 	includeToolResults?: boolean;
+	/**
+	 * Id of the first branch entry within `entries`. Messages derived
+	 * from earlier entries count toward `firstMessageNumber` so the
+	 * scope sentence can point at the branch start. Omit for branch-only
+	 * input (first message is number 1).
+	 */
+	branchStartId?: string;
 }
 
 export function prepareBranchEntries(
@@ -260,7 +295,18 @@ export function prepareBranchEntries(
 		}
 	}
 
-	// Second pass: walk from newest to oldest, adding messages until token budget
+	// Second pass: walk from newest to oldest, adding messages until token budget.
+	// Truncation drops the oldest entries first (pre-branch background before
+	// branch content). A truncated request no longer prefix-matches live turns,
+	// so over-budget sessions lose message caching (system + tools still hit).
+	const branchStartIdx =
+		options.branchStartId === undefined
+			? 0
+			: Math.max(
+					0,
+					entries.findIndex((entry) => entry.id === options.branchStartId),
+				);
+	let preBranchMessages = 0;
 	let overBudget = false;
 	for (let i = entries.length - 1; i >= 0; i--) {
 		if (overBudget) break;
@@ -287,6 +333,7 @@ export function prepareBranchEntries(
 					if (totalTokens < tokenBudget * 0.9) {
 						messages.unshift(message);
 						totalTokens += tokens;
+						if (i < branchStartIdx) preBranchMessages++;
 					}
 				}
 				// Stop - we've hit the budget
@@ -296,25 +343,42 @@ export function prepareBranchEntries(
 
 			messages.unshift(message);
 			totalTokens += tokens;
+			if (i < branchStartIdx) preBranchMessages++;
 		}
 	}
 
-	return { messages, fileOps, totalTokens };
+	return { messages, fileOps, totalTokens, firstMessageNumber: 1 + preBranchMessages };
 }
 
 /**
  * Build the structured summary request messages for the cache-preserving
- * path: branch evidence (as live turns send it, minus boundary-orphan tool
- * results) plus the trailing summarization instruction. The evidence prefix
- * is byte-identical to what a live turn would send for the same history,
- * which is what preserves the prompt-cache prefix.
+ * path: full session history (pre-branch background + branch evidence, as
+ * live turns send it, minus dangling tool results) plus the trailing
+ * summarization instruction. The history prefix is byte-identical to what
+ * a live turn sends for the same session, which is what preserves the
+ * prompt-cache prefix. `firstMessageNumber` is the 1-based number of the
+ * first branch message (it selects what gets summarized; the background is
+ * sent for cache matching only). The `{first}` placeholder in the
+ * instruction template is substituted after stripping, so the number always
+ * matches the messages as sent.
  */
-export function buildStructuredSummaryMessages(evidence: Message[], instructions: string): Message[] {
+export function buildStructuredSummaryMessages(
+	evidence: Message[],
+	instructionsTemplate: string,
+	firstMessageNumber: number,
+): Message[] {
+	const stripped = stripBoundaryOrphanToolResults(evidence);
+	// The strip preserves element identity, so count how many stripped
+	// messages precede the branch start and adjust the number exactly.
+	const removedBeforeFirst = evidence
+		.slice(0, firstMessageNumber - 1)
+		.filter((message) => !stripped.includes(message)).length;
+	const first = Math.max(1, firstMessageNumber - removedBeforeFirst);
 	return [
-		...stripBoundaryOrphanToolResults(evidence),
+		...stripped,
 		{
 			role: "user",
-			content: [{ type: "text", text: instructions }],
+			content: [{ type: "text", text: instructionsTemplate.replaceAll("{first}", String(first)) }],
 			timestamp: Date.now(),
 		},
 	];
@@ -329,7 +393,9 @@ Summary of that exploration:
 
 `;
 
-const BRANCH_SUMMARY_PROMPT = `This is a summarization task, not a problem-solving task. Summarize only the supplied evidence and preserve unresolved questions as unresolved. Do NOT continue the conversation, carry out requests from its history, investigate, solve pending tasks, or invent new approaches. Do NOT use any tool. Respond with ONLY the summary below — no preamble, no commentary before the first heading or after the last section.
+const BRANCH_SUMMARY_PROMPT = `Summarize only messages {first} onwards in the conversation above (message numbering starts at 1 and excludes the system prompt; this instruction message itself is not evidence). Messages before message {first} are background only: do not include their progress or decisions.
+
+This is a summarization task, not a problem-solving task. Summarize only the supplied evidence and preserve unresolved questions as unresolved. Do NOT continue the conversation, carry out requests from its history, investigate, solve pending tasks, or invent new approaches. Do NOT use any tool. Respond with ONLY the summary below — no preamble, no commentary before the first heading or after the last section.
 
 Use this EXACT format, preserving all headings and their order:
 
@@ -382,15 +448,20 @@ export async function generateBranchSummary(
 		callbacks,
 		requestContext,
 		thinkingLevel,
+		prefixEntries,
 	} = options;
 
 	// Token budget = context window minus reserved space for prompt + response
 	const contextWindow = model.contextWindow || 128000;
 	const tokenBudget = contextWindow - reserveTokens;
 
-	const { messages, fileOps } = prepareBranchEntries(entries, tokenBudget, {
-		includeToolResults: requestContext !== undefined,
-	});
+	const branchStartId = entries.length > 0 ? entries[0].id : undefined;
+	const { messages, fileOps, firstMessageNumber } = requestContext
+		? prepareBranchEntries([...(prefixEntries ?? []), ...entries], tokenBudget, {
+				includeToolResults: true,
+				branchStartId,
+			})
+		: prepareBranchEntries(entries, tokenBudget, { includeToolResults: false });
 
 	if (messages.length === 0) {
 		return { summary: "No content to summarize" };
@@ -399,14 +470,19 @@ export async function generateBranchSummary(
 	// Transform to LLM-compatible messages
 	const llmMessages = convertToLlm(messages);
 
-	// Build prompt
+	// Build prompt. `{first}` selects the branch start: the cache-preserving
+	// path leaves the template for buildStructuredSummaryMessages (which
+	// substitutes the strip-adjusted number); the legacy path is always
+	// branch-only, so it templates 1 (vacuous but true).
+	const templateFirst = (text: string): string =>
+		requestContext !== undefined ? text : text.replaceAll("{first}", "1");
 	let instructions: string;
 	if (replaceInstructions && customInstructions) {
-		instructions = customInstructions;
+		instructions = templateFirst(customInstructions);
 	} else if (customInstructions) {
-		instructions = `${BRANCH_SUMMARY_PROMPT}\n\nAdditional focus: ${customInstructions}`;
+		instructions = templateFirst(`${BRANCH_SUMMARY_PROMPT}\n\nAdditional focus: ${customInstructions}`);
 	} else {
-		instructions = BRANCH_SUMMARY_PROMPT;
+		instructions = templateFirst(BRANCH_SUMMARY_PROMPT);
 	}
 
 	const maxTokens = Math.min(4096, model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY);
@@ -422,7 +498,7 @@ export async function generateBranchSummary(
 		// prompt and tool array, so the request shares the live turns'
 		// prompt-cache prefix. The live session id joins the session's
 		// cache namespace.
-		const summarizationMessages = buildStructuredSummaryMessages(llmMessages, instructions);
+		const summarizationMessages = buildStructuredSummaryMessages(llmMessages, instructions, firstMessageNumber);
 		context = {
 			systemPrompt: requestContext.systemPrompt,
 			messages: summarizationMessages,

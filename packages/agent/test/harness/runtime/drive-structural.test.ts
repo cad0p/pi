@@ -134,6 +134,7 @@ function branchPreparation(): Extract<DurableStructuralPreparation, { kind: "bra
 		messages: [user("abandoned")],
 		fileOps: { read: [], written: [], edited: [] },
 		totalTokens: 10,
+		firstMessageNumber: 1,
 	};
 }
 

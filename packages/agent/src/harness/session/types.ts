@@ -373,6 +373,7 @@ export type DurableStructuralPreparation =
 			messages: BranchPreparation["messages"];
 			fileOps: DurableFileOperations;
 			totalTokens: number;
+			firstMessageNumber: BranchPreparation["firstMessageNumber"];
 	  };
 
 export interface UsageRow {

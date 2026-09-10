@@ -67,6 +67,7 @@ describe("v4 branch summarization", () => {
 		expect(result.commonAncestorId).toBe(common.id);
 		expect(result.entries.map((entry) => entry.id)).toEqual([abandoned1.id, abandoned2.id]);
 		expect(result.entries.some((entry) => entry.id === root.id)).toBe(false);
+		expect(result.prefixEntries.map((entry) => entry.id)).toEqual([root.id, common.id]);
 	});
 
 	it("returns no entries when there was no previous leaf", async () => {
@@ -74,6 +75,7 @@ describe("v4 branch summarization", () => {
 		const { branch, session } = branchReader([target]);
 		expect(await collectEntriesForBranchSummary(branch, session, null, target.id, BACKGROUND_CONTEXT)).toEqual({
 			entries: [],
+			prefixEntries: [],
 			commonAncestorId: null,
 		});
 	});
@@ -107,11 +109,38 @@ describe("cache-preserving branch summary request", () => {
 
 	it("appends the instruction without touching the evidence prefix", () => {
 		const evidence: Message[] = [{ role: "user", content: "hello", timestamp: 1 } as Message];
-		const built = buildStructuredSummaryMessages(evidence, "do the thing");
+		const built = buildStructuredSummaryMessages(evidence, "do the thing", 1);
 		expect(built).toHaveLength(2);
 		expect(JSON.stringify(built.slice(0, 1))).toBe(JSON.stringify(evidence));
 		expect(built[1].role).toBe("user");
 		expect(JSON.stringify(built).includes("<conversation>")).toBe(false);
+	});
+
+	it("numbers the first branch message after background entries", () => {
+		const bg = messageEntry("bg", null, "background", 1);
+		const first = messageEntry("first", bg.id, "branch start", 2);
+		const second = messageEntry("second", first.id, "branch end", 3);
+		const all = [bg, first, second];
+		expect(prepareBranchEntries(all, 0).firstMessageNumber).toBe(1);
+		expect(prepareBranchEntries(all, 0, { branchStartId: first.id }).firstMessageNumber).toBe(2);
+		expect(prepareBranchEntries(all, 0, { branchStartId: second.id }).firstMessageNumber).toBe(3);
+	});
+
+	it("substitutes the strip-adjusted branch number into the instruction", () => {
+		const evidence: Message[] = [
+			{
+				role: "toolResult",
+				toolCallId: "call-missing",
+				toolName: "read",
+				content: [{ type: "text", text: "orphan" }],
+				isError: false,
+				timestamp: 1,
+			} as Message,
+			{ role: "user", content: "hello", timestamp: 2 } as Message,
+		];
+		const built = buildStructuredSummaryMessages(evidence, "Summarize only messages {first} onwards", 2);
+		expect(built).toHaveLength(2);
+		expect(JSON.stringify(built[1])).toContain("messages 1 onwards");
 	});
 
 	it("sends structured history under the live prefix when requestContext is provided", async () => {

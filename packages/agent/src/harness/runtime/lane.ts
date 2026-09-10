@@ -782,22 +782,19 @@ export class Lane<TContext extends object | undefined> implements AgentLane {
 					]);
 					const oldIds = new Set(oldPath.map((entry) => entry.id));
 					const commonAncestorId = targetPath.find((entry) => oldIds.has(entry.id))?.id ?? null;
-					// Include tool results: the structural consumer sends
-					// the preparation as structured history under the live
-					// request prefix, which must match live turns
-					// byte-for-byte for prompt-cache hits.
-					preparation = prepareBranchEntries(
-						oldPath
-							.slice(
-								0,
-								commonAncestorId === null
-									? oldPath.length
-									: oldPath.findIndex((entry) => entry.id === commonAncestorId),
-							)
-							.reverse(),
-						0,
-						{ includeToolResults: true },
-					);
+					// Full-history prefix (background + branch) as structured
+					// history under the live request prefix, which must match
+					// live turns byte-for-byte for prompt-cache hits. The
+					// scope sentence selects the branch for summarization.
+					const branchEndIdx =
+						commonAncestorId === null
+							? oldPath.length
+							: oldPath.findIndex((entry) => entry.id === commonAncestorId);
+					const branchTipFirst = oldPath.slice(0, branchEndIdx);
+					preparation = prepareBranchEntries([...oldPath].reverse(), 0, {
+						includeToolResults: true,
+						branchStartId: branchTipFirst.length > 0 ? branchTipFirst[branchTipFirst.length - 1].id : undefined,
+					});
 				}
 			}
 			const accepted = await this.command<OperationAdmissionResult | undefined>(async (state, reader) => {

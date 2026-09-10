@@ -3141,11 +3141,11 @@ export class AgentSession {
 		}
 
 		// Collect entries to summarize (from old leaf to common ancestor)
-		const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(
-			this.sessionManager,
-			oldLeafId,
-			targetId,
-		);
+		const {
+			entries: entriesToSummarize,
+			prefixEntries: prefixEntriesForSummary,
+			commonAncestorId,
+		} = collectEntriesForBranchSummary(this.sessionManager, oldLeafId, targetId);
 
 		// Prepare event data - mutable so extensions can override
 		let customInstructions = options.customInstructions;
@@ -3229,6 +3229,10 @@ export class AgentSession {
 						sessionId: this.sessionId,
 					},
 					thinkingLevel: this.thinkingLevel,
+					// Full-history prefix (background + branch) so the request
+					// shares the live turns' cache prefix; the scope sentence
+					// selects the branch for summarization.
+					prefixEntries: prefixEntriesForSummary,
 				});
 				if (result.aborted) {
 					return { cancelled: true, aborted: true };
