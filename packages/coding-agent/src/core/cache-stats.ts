@@ -40,9 +40,12 @@ interface PreviousRequest {
 	modelKey: string;
 	timestamp: number;
 	/**
-	 * Sticky: some earlier request in this scan segment reported cache activity.
-	 * Distinguishes a total miss on a cache-read-only provider (OpenAI-style,
-	 * writes unreported) from a provider that never reports caching at all.
+	 * Sticky: some earlier request in this session reported cache activity.
+	 * Session-scoped (never reset by context boundaries): provider cache
+	 * capability does not change across compactions, while the prompt
+	 * baseline legitimately does. Distinguishes a total miss on a
+	 * cache-read-only provider (OpenAI-style, writes unreported) from a
+	 * provider that never reports caching at all.
 	 */
 	reportedCache: boolean;
 }
@@ -109,11 +112,18 @@ function scan(
 	const totals: CacheWasteTotals = { missedTokens: 0, missedCost: 0, missCount: 0 };
 	const misses = new Map<AssistantMessage, CacheMiss>();
 
+	// Session-level cache capability: any measured cache activity (assistant
+	// turns AND summary requests) proves the provider reports caching, so a
+	// later zero-read is a real miss even across a context boundary.
+	let everReportedCache = false;
 	for (const entry of entries) {
 		if (entry.type === "compaction" || entry.type === "branch_summary") {
 			// The context legitimately changed; the next turn's prompt is new content,
 			// not re-billed content. Model switches are NOT exempt: they re-bill the
 			// full prompt and should be counted.
+			if (entry.usage && entry.usage.cacheRead + entry.usage.cacheWrite > 0) {
+				everReportedCache = true;
+			}
 			prev = undefined;
 			continue;
 		}
@@ -125,7 +135,10 @@ function scan(
 				totals.missCount += 1;
 				misses.set(entry.message, miss);
 			}
-			prev = asPreviousRequest(entry.message, prev?.reportedCache ?? false) ?? prev;
+			if (entry.message.usage.cacheRead + entry.message.usage.cacheWrite > 0) {
+				everReportedCache = true;
+			}
+			prev = asPreviousRequest(entry.message, (prev?.reportedCache ?? false) || everReportedCache) ?? prev;
 		}
 	}
 	return { prev, totals, misses };

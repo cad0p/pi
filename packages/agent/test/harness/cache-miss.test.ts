@@ -135,9 +135,22 @@ describe("detectBranchSummaryCacheMiss", () => {
 		expect(miss?.idleMs).toBe(1);
 	});
 
-	it("treats a lone post-reset turn without cache activity as a first request", () => {
+	it("keeps session cache capability across a reset (E2E: earlier summary hit, later full miss)", () => {
 		const history: AgentMessage[] = [
 			assistantMessage(usage({ cacheWrite: 100_000 })),
+			{ role: "compactionSummary", summary: "compacted", tokensBefore: 1_000, timestamp: 2 },
+			userMessage("newer work"),
+			assistantMessage(usage({ input: 2_000 }), { timestamp: 3 }),
+		];
+		// Cache capability is session-scoped: the pre-reset write proves the
+		// provider reports caching, so the within-segment zero-read still counts.
+		const miss = detectBranchSummaryCacheMiss(history, summaryMessage(usage({ input: 60_000 })), models);
+		expect(miss?.missedTokens).toBe(2_000);
+	});
+
+	it("still skips cache-less providers across a reset", () => {
+		const history: AgentMessage[] = [
+			assistantMessage(usage({ input: 100_000 })),
 			{ role: "compactionSummary", summary: "compacted", tokensBefore: 1_000, timestamp: 2 },
 			userMessage("newer work"),
 			assistantMessage(usage({ input: 2_000 }), { timestamp: 3 }),

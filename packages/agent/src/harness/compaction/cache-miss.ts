@@ -120,7 +120,11 @@ export function detectBranchSummaryCacheMiss(
 	response: AssistantMessage,
 	models: ModelPriceSource,
 ): BranchSummaryCacheMiss | undefined {
+	// Session-level cache capability (see classic scan): any measured cache
+	// activity, including on earlier summaries, proves the provider reports
+	// caching, so a later zero-read is a real miss even across a boundary.
 	let prev: PreviousRequest | undefined;
+	let everReportedCache = false;
 	for (const message of messages) {
 		if (message.role === "branchSummary" || message.role === "compactionSummary") {
 			// The context legitimately changed; the summary prompt after this
@@ -129,7 +133,10 @@ export function detectBranchSummaryCacheMiss(
 			continue;
 		}
 		if (message.role === "assistant") {
-			prev = asPreviousRequest(message, prev?.reportedCache ?? false) ?? prev;
+			if (message.usage.cacheRead + message.usage.cacheWrite > 0) {
+				everReportedCache = true;
+			}
+			prev = asPreviousRequest(message, (prev?.reportedCache ?? false) || everReportedCache) ?? prev;
 		}
 	}
 	return detectMiss(prev, response, models);

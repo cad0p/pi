@@ -66,6 +66,18 @@ function assistantEntry(id: string, parentId: string | null, messageUsage: Usage
 // read it back.
 const warmedEntries: SessionEntry[] = [assistantEntry("turn-1", null, usage({ cacheWrite: 100_000 }), 0)];
 
+function summaryEntry(id: string, entryUsage: Usage, timestamp = 1): SessionEntry {
+	return {
+		type: "branch_summary",
+		id,
+		parentId: null,
+		timestamp: new Date(timestamp).toISOString(),
+		fromId: "branch-tip",
+		summary: "earlier summary",
+		usage: entryUsage,
+	};
+}
+
 function probeUsage(responseUsage: Usage): { usage: Usage; provider: string; model: string; timestamp: number } {
 	return { usage: responseUsage, provider: "anthropic", model: "test-model", timestamp: 60_000 };
 }
@@ -95,6 +107,26 @@ describe("branch summary cache-miss detection", () => {
 
 	it("stays silent with no previous request", () => {
 		expect(detect([], usage({ input: 100_000 }))).toBeUndefined();
+	});
+
+	it("keeps session cache capability across a summary boundary (E2E: earlier summary hit, later full miss)", () => {
+		const history = [
+			assistantEntry("a", null, usage({ cacheWrite: 100_000 }), 0),
+			summaryEntry("s", usage({ input: 500, cacheRead: 61_425 }), 1),
+			assistantEntry("b", "s", usage({ input: 2_000 }), 2),
+		];
+		// The earlier summary's cache read proves the provider reports caching,
+		// so the within-segment zero-read still counts despite the reset.
+		expect(detect(history, usage({ input: 63_000 }))?.missedTokens).toBe(2_000);
+	});
+
+	it("still skips cache-less providers across a summary boundary", () => {
+		const history = [
+			assistantEntry("a", null, usage({ input: 100_000 }), 0),
+			summaryEntry("s", usage({ input: 500 }), 1),
+			assistantEntry("b", "s", usage({ input: 2_000 }), 2),
+		];
+		expect(detect(history, usage({ input: 63_000 }))).toBeUndefined();
 	});
 
 	it("skips providers that report no cache activity", () => {
